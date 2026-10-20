@@ -97,6 +97,8 @@ def test_generate_refuses_to_overwrite_and_needs_cases(repo, capsys):  # noqa: F
     weaken(repo)
     assert main(["generate", PKG, "-o", "tests/package_manager_in_container.yaml"]) == 1
     assert "exists" in capsys.readouterr().err
+    assert main(["generate", "Package manager run in containr"]) == 2
+    assert f"did you mean '{PKG}'" in capsys.readouterr().err
     (repo / "tests" / "package_manager_in_container.yaml").unlink()
     assert main(["generate", PKG]) == 1
     assert "write a suite first" in capsys.readouterr().err

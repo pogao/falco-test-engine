@@ -113,6 +113,7 @@ def _default_suite_path(cfg: Config, name: str, suffix: str = "") -> Path:
 
 
 def _generate(cfg: Config, name: str, output: Path | None) -> int:
+    _load_rule(cfg, name)
     cfg = dataclasses.replace(
         cfg,
         noise=dataclasses.replace(cfg.noise, enabled=False),
@@ -169,7 +170,8 @@ def generated_suite(rule: str, survivors: list[Survivor]) -> str:
         cases.setdefault(s.example.yaml(with_defaults=shared is None), []).append(s)
     for text, catching in cases.items():
         g = catching[0].example
-        lines.append(f"  # Generated from `{g.extends}`: changes {g.changed.replace('`', '')}.")
+        changed = g.changed.replace("`", "")
+        lines.append(f"  # Generated from `{g.extends}` in {g.suite.display}: changes {changed}.")
         for s in catching:
             lines.append(f"  # Catches {s.mutant.description.replace('`', '')}.")
         lines.append(
