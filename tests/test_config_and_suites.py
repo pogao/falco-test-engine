@@ -90,7 +90,7 @@ def suite(cases, **extra):
         (suite([{"name": "a", "expect": "yes"}]), "match or no_match"),
         (suite([{"name": "a", "expect": "no_match", "output_contains": "x"}]), "needs the case to expect"),
         (suite([{"name": "a", "expect": "match"}, {"name": "a", "expect": "match"}]), "duplicate case"),
-        ({"rule": "R", "cases": [{"name": "a", "expect": "match"}]}, "no evt.type"),
+        ({"rule": "R", "cases": [{"name": "a", "expect": "match"}]}, "exactly one evt.type"),
         (suite([{"name": "a", "expect": "match", "event": {"proc.name": {"x": 1}}}]), "scalars"),
         (suite([]), "non-empty"),
     ],

@@ -42,6 +42,12 @@ class Field:
 class Transformer:
     name: str
     args: tuple[Operand, ...]
+    arg: str | None = None
+
+
+@dataclass(frozen=True)
+class TransformerList:
+    items: tuple[Operand, ...]
 
 
 @dataclass(frozen=True)
@@ -72,7 +78,7 @@ class Check:
 
 
 type Node = And | Or | Not | Identifier | Check
-type Operand = Field | Transformer | Value | ListValue
+type Operand = Field | Transformer | TransformerList | Value | ListValue
 
 
 def parse(obj: Any, path: str = "$") -> Node:
@@ -109,10 +115,15 @@ def _operand(obj: Any, path: str) -> Operand:
             return Field(_member(obj, "field", str, path), arg)
         case "transformer":
             args = _member(obj, "args", list, path)
+            arg = obj.get("arg")
             return Transformer(
                 _member(obj, "name", str, path),
                 tuple(_operand(a, f"{path}.args[{i}]") for i, a in enumerate(args)),
+                arg if isinstance(arg, str) else None,
             )
+        case "transformer_list":
+            items = _member(obj, "children", list, path)
+            return TransformerList(tuple(_operand(a, f"{path}.children[{i}]") for i, a in enumerate(items)))
         case "value":
             return Value(_member(obj, "value", str, path))
         case "list":
@@ -190,8 +201,11 @@ def render(node: Node | Operand, max_items: int | None = None) -> str:
             return text if rhs is None else f"{text} {render(rhs, max_items)}"
         case Field(field, arg):
             return field if arg is None else f"{field}[{arg}]"
-        case Transformer(name, args):
-            return f"{name}({', '.join(render(a, max_items) for a in args)})"
+        case Transformer(name, args, arg):
+            text = f"{name}({', '.join(render(a, max_items) for a in args)})"
+            return text if arg is None else f"{text}[{arg}]"
+        case TransformerList(items):
+            return f"({', '.join(render(a, max_items) for a in items)})"
         case Value(value):
             return quote(value)
         case ListValue(values):

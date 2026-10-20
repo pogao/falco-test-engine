@@ -39,13 +39,13 @@ def judge(
 
     if result is None:
         return outcome("no result", ["the engine returned no result for this case"])
+    known_rules = set(known_rules)
+    if known_rules and rule not in known_rules:
+        return outcome("rule not loaded", [f"rule `{rule}` is not loaded{_did_you_mean(rule, known_rules)}"])
     if isinstance(result, CaseError):
         failures = [f"engine error: {result.error}"]
         failures += [f"unknown field `{f}`{_did_you_mean(f, known_fields)}" for f in result.unknown_fields]
         return outcome("error", failures)
-    if rule not in set(known_rules):
-        return outcome("rule not loaded", [f"rule `{rule}` is not loaded{_did_you_mean(rule, known_rules)}"])
-
     fired = frozenset(a.rule for a in result.alerts)
     failures = [f for e in case.expectations if (f := _check(e, rule, result, fired))]
     trace = result.traces.get(rule)

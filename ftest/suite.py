@@ -130,8 +130,8 @@ def _case(raw: Any, rule: str, defaults: dict[str, tuple[str, ...]], where: str,
         expectations.append(ExpectOutput(tuple(needles)))
 
     event = {**defaults, **_event(doc.get("event", {}), f"{where}: event")}
-    if "evt.type" not in event:
-        raise SuiteError(f"{where}: no evt.type; set it in `defaults` or the case event")
+    if len(event.get("evt.type", ())) != 1:
+        raise SuiteError(f"{where}: needs exactly one evt.type; set it in `defaults` or the case event")
     return Case(f"{display}::{name}", name, derive(event), tuple(expectations))
 
 

@@ -145,3 +145,29 @@ def test_raw_ast_builder_matches_contract_example():
         "lhs": {"type": "field", "field": "proc.name", "arg": None},
         "rhs": {"type": "list", "values": ["bash", "sh"]},
     }
+
+
+def test_null_raw_ast_falls_back_to_the_compiled_condition():
+    from ftest.explain import explain
+
+    doc = shell_result()
+    doc["rules"][0]["condition_raw_ast"] = None
+    rule = parse_result(doc).rules[SHELL]
+    assert rule.raw is None
+    shape = shape_of(rule)
+    assert not shape.aligned and shape.body is rule.compiled
+    assert explain(rule, {})[1] == "Fires when all of:"
+
+
+def test_case_error_for_an_unknown_traced_rule_reads_as_rule_not_loaded():
+    from ftest.outcomes import judge
+
+    doc = shell_result()
+    doc["cases"] = [
+        {"id": "s.yaml::bash", "error": "unknown rule in trace_rules: Terminal shel", "unknown_fields": []}
+    ]
+    parsed = parse_result(doc)
+    outcome = judge(make_case(), "Terminal shel", parsed.cases["s.yaml::bash"], parsed.rules, ())
+    assert outcome.failures == (
+        "rule `Terminal shel` is not loaded (did you mean `Terminal shell in container`?)",
+    )

@@ -466,7 +466,7 @@ def _repeats(view: RuleView) -> Iterator[Finding]:
                 f"list `{name}` repeats {', '.join(f'`{d}`' for d in dups)}",
                 "Remove the repeated items. Equivalent: list membership is a set lookup.",
             )
-    for check in checks(view.shape.raw):
+    for check in checks(view.shape.raw) if view.shape.raw is not None else ():
         if isinstance(check.rhs, ListValue) and (dups := _duplicates(check.rhs.values)):
             yield _finding(
                 view,
@@ -568,6 +568,7 @@ _OUTPUT_TOKEN = re.compile(r"%(\()?([A-Za-z_][\w.]*(?:\[[^\]]*\])?)(?(1)\))")
 
 def na_fields(template: str, output: str) -> list[str]:
     """Output fields that rendered `<NA>`, found by matching the output against its template."""
+    template = template.removeprefix("*")
     parts, fields, pos = [], [], 0
     for m in _OUTPUT_TOKEN.finditer(template):
         parts += [re.escape(template[pos : m.start()]), "(.*?)"]

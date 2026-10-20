@@ -13,7 +13,8 @@ _MAX_MACRO_TEXT = 110
 
 def explain(rule: Rule, macros: Mapping[str, Macro]) -> tuple[str, ...]:
     lines = [_events(rule)]
-    terms = list(rule.raw.children) if isinstance(rule.raw, And) else [rule.raw]
+    root = rule.raw if rule.raw is not None else rule.compiled
+    terms = list(root.children) if isinstance(root, And) else [root]
     if len(terms) == 1:
         lines.append(f"Fires when {_term(terms[0], macros)}.")
     else:

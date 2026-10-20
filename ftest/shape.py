@@ -29,7 +29,7 @@ class ExceptionClause:
 
 @dataclass(frozen=True)
 class Shape:
-    raw: Node
+    raw: Node | None
     body: Node
     exceptions: tuple[ExceptionClause, ...]
     macros: tuple[MacroUse, ...]
@@ -64,7 +64,7 @@ def shape_of(rule: Rule) -> Shape:
         split = (compiled.children[0], tuple(c.child for c in compiled.children[1:]))
         attempts.insert(0 if rule.exception_names else 1, split)
 
-    for body, clauses in attempts:
+    for body, clauses in attempts if rule.raw is not None else ():
         raw_of: dict[int, Node] = {}
         macro_of: dict[int, str] = {}
         macros: list[MacroUse] = []

@@ -58,3 +58,28 @@ def test_conjuncts_flatten_nested_ands():
 def test_parse_reports_the_path_of_bad_nodes():
     with pytest.raises(AstError, match=r"\$\.children\[1\]"):
         parse({"type": "and", "children": [ast_json("a.x = 1"), {"type": "bogus"}]})
+
+
+def test_transformer_lists_and_transformer_args_render():
+    node = parse(
+        {
+            "type": "check",
+            "op": "=",
+            "lhs": {
+                "type": "transformer",
+                "name": "concat",
+                "arg": None,
+                "args": [
+                    {
+                        "type": "transformer_list",
+                        "children": [
+                            {"type": "field", "field": "proc.name", "arg": None},
+                            {"type": "value", "value": "-x"},
+                        ],
+                    }
+                ],
+            },
+            "rhs": {"type": "value", "value": "bash-x"},
+        }
+    )
+    assert render(node) == "concat((proc.name, -x)) = bash-x"

@@ -74,7 +74,7 @@ class Rule:
     enabled: bool
     priority: str
     evttypes: tuple[str, ...]
-    raw: cond.Node
+    raw: cond.Node | None
     compiled: cond.Node
     leaf_count: int
     description: str = ""
@@ -289,7 +289,9 @@ def _rule(r: dict, described: dict | None) -> Rule:
         enabled=bool(r["enabled"]),
         priority=str(r["priority"]).upper(),
         evttypes=tuple(r["evttypes"]),
-        raw=cond.parse(r["condition_raw_ast"], f"{r['name']}.condition_raw_ast"),
+        raw=None
+        if r.get("condition_raw_ast") is None
+        else cond.parse(r["condition_raw_ast"], f"{r['name']}.condition_raw_ast"),
         compiled=cond.parse(r["condition_ast"], f"{r['name']}.condition_ast"),
         leaf_count=int(r["leaf_count"]),
         description=_oneline(info.get("description", "")),
