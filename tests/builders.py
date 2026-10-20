@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
+from pathlib import Path
 
 _OPS = (
     "exists",
@@ -291,6 +292,11 @@ n = len(list(here.glob("job-*.json")))
 (here / f"job-{{n}}.json").write_text(json.dumps(job))
 for entry in json.loads((here / "responses.json").read_text()):
     if entry["rules_files"] in (None, job["rules_files"]):
+        if "world" in entry:
+            sys.path.insert(0, {tests!r})
+            import samples
+            print(json.dumps(samples.World(**entry["world"]).result(job["cases"])))
+            sys.exit(0)
         if "exit" in entry:
             sys.stdout.write(entry.get("stdout", ""))
             sys.stderr.write(entry.get("stderr", ""))
@@ -305,8 +311,9 @@ sys.exit("fake engine: no response for " + repr(job["rules_files"]))
 
 
 def install_fake_engine(bin_dir, state_dir, responses, name="falco-test-engine"):
-    """A stand-in engine on PATH. Each response is {"rules_files": [...] | None, "result": {...}}
-    with cases given as "cases_by_id", or {"exit": n, "stdout": ...}. Jobs land in state_dir."""
+    """A stand-in engine on PATH. Each response matches on "rules_files" (None matches any job) and
+    gives a sample "world" spec that evaluates the job's cases, a canned "result" with cases in
+    "cases_by_id", or an "exit" code with "stdout"/"stderr". Received jobs land in state_dir."""
     import json
     import os
     import sys
@@ -315,7 +322,8 @@ def install_fake_engine(bin_dir, state_dir, responses, name="falco-test-engine")
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "responses.json").write_text(json.dumps(list(responses)))
     script = bin_dir / name
-    script.write_text(FAKE_ENGINE.format(python=sys.executable, state=str(state_dir)))
+    tests = str(Path(__file__).resolve().parent)
+    script.write_text(FAKE_ENGINE.format(python=sys.executable, state=str(state_dir), tests=tests))
     os.chmod(script, 0o755)
     return script
 
