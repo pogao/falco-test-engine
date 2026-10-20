@@ -1,0 +1,6 @@
+rules_files:
+  - /etc/falco/falco_rules.yaml
+  - rules/custom_rules.yaml
+base_rules_files:
+  - /etc/falco/falco_rules.yaml
+tests: [tests/]

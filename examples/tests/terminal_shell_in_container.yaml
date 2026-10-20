@@ -1,0 +1,32 @@
+rule: Terminal shell in container
+intent: >
+  Alert when someone opens an interactive shell (kubectl exec -it) in any container,
+  except shells in our CI runner image and in the break-glass namespace.
+defaults:
+  evt.type: execve
+  container.id: 3ad7b26ded6d
+  container.image.repository: docker.io/library/nginx
+  k8s.ns.name: web
+  proc.tty: 34816
+  proc.pname: runc
+  user.name: root
+cases:
+  - name: kubectl exec bash into nginx
+    expect: match
+    event: {proc.name: bash, proc.cmdline: bash}
+    output_contains: [bash, "terminal=34816"]
+  - name: sh with no terminal is not interactive
+    expect: no_match
+    event: {proc.name: sh, proc.tty: 0}
+  - name: CI runner image is allowed
+    expect: no_match
+    event: {proc.name: bash, container.image.repository: ghcr.io/acme/ci-runner}
+  - name: break-glass namespace is allowed
+    expect: no_match
+    event: {proc.name: bash, k8s.ns.name: break-glass}
+  - name: other acme images still alert
+    expect: match
+    event: {proc.name: bash, container.image.repository: ghcr.io/acme/payments-api}
+  - name: shell on the host is out of scope
+    expect: no_match
+    event: {proc.name: bash, container.id: host}

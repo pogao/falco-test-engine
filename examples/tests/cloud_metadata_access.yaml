@@ -1,0 +1,29 @@
+rule: Cloud metadata access from container
+intent: >
+  Alert when a container connects to the instance metadata service (EC2 IMDS or the ECS
+  task endpoint), except the node agents that need it.
+defaults:
+  evt.type: connect
+  container.id: 51c0e7a3b2f9
+  container.image.repository: docker.io/curlimages/curl
+  k8s.ns.name: web
+  proc.name: curl
+  proc.cmdline: curl http://169.254.169.254/latest/meta-data/iam/
+  fd.sport: 80
+cases:
+  - name: curl to IMDS
+    expect: match
+    event: {fd.sip: 169.254.169.254}
+    output_contains: ["dest=169.254.169.254:80"]
+  - name: ECS task metadata endpoint
+    expect: match
+    event: {fd.sip: 169.254.170.2}
+  - name: aws-node is allowed
+    expect: no_match
+    event: {fd.sip: 169.254.169.254, container.image.repository: public.ecr.aws/eks/aws-node}
+  - name: ordinary service traffic
+    expect: no_match
+    event: {fd.sip: 10.0.12.7}
+  - name: host process is out of scope
+    expect: no_match
+    event: {fd.sip: 169.254.169.254, container.id: host}
