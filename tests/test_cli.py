@@ -65,7 +65,9 @@ def test_run_passes_on_the_example_rules(repo, capsys):
     assert {r["name"] for r in doc["rules"]} == {SHELL, PKG, META}
 
     full_job, base_job = received_jobs(state)
-    assert base_job["cases"] == [] and base_job["rules_files"] == ["/etc/falco/falco_rules.yaml"]
+    assert base_job["rules_files"] == ["/etc/falco/falco_rules.yaml"]
+    assert base_job["cases"] and all(c["trace_rules"] == [] for c in base_job["cases"])
+    assert {c["id"] for c in base_job["cases"]} < {c["id"] for c in full_job["cases"]}
     pip = next(c for c in full_job["cases"] if c["id"].endswith("::pip from sh"))
     assert pip["trace_rules"] == [PKG]
     assert pip["fields"]["proc.pname"] == ["sh"] and pip["fields"]["proc.aname[2]"] == ["runc"]

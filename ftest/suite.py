@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from ftest.config import fraction
 from ftest.fixtures import derive
 
 
@@ -36,10 +37,13 @@ type Expectation = ExpectFires | ExpectExactRules | ExpectOutput
 
 @dataclass(frozen=True)
 class Case:
+    """`event` is what the engine sees: defaults, the case's own fields (`given`), and derived fields."""
+
     id: str
     name: str
     event: Mapping[str, tuple[str, ...]]
     expectations: tuple[Expectation, ...]
+    given: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,8 @@ class Suite:
     rule: str
     intent: str | None
     cases: tuple[Case, ...]
+    defaults: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    max_fire_rate: float | None = None
 
 
 def suite_files(paths: Iterable[Path]) -> list[Path]:
@@ -76,14 +82,17 @@ def load_suites(paths: Iterable[Path], root: Path) -> tuple[Suite, ...]:
 
 
 def parse_suite(raw: Any, path: Path, display: str) -> Suite:
-    doc = _mapping(raw, display, {"rule", "intent", "defaults", "cases"})
+    doc = _mapping(raw, display, {"rule", "intent", "defaults", "cases", "max_fire_rate"})
     rule = doc.get("rule")
     if not isinstance(rule, str) or not rule:
         raise SuiteError(f"{display}: `rule` must name the rule under test")
     intent = doc.get("intent")
     if intent is not None and not isinstance(intent, str):
         raise SuiteError(f"{display}: `intent` must be text")
-    defaults = _event(doc.get("defaults", {}), f"{display}: defaults")
+    defaults = parse_event(doc.get("defaults", {}), f"{display}: defaults")
+    max_fire_rate = doc.get("max_fire_rate")
+    if max_fire_rate is not None:
+        max_fire_rate = fraction(max_fire_rate, f"{display}: max_fire_rate", SuiteError)
     cases_raw = doc.get("cases")
     if not isinstance(cases_raw, list) or not cases_raw:
         raise SuiteError(f"{display}: `cases` must be a non-empty list")
@@ -94,7 +103,8 @@ def parse_suite(raw: Any, path: Path, display: str) -> Suite:
         if any(c.name == case.name for c in cases):
             raise SuiteError(f"{display}: duplicate case name {case.name!r}")
         cases.append(case)
-    return Suite(path, display, rule, " ".join(intent.split()) if intent else None, tuple(cases))
+    intent = " ".join(intent.split()) if intent else None
+    return Suite(path, display, rule, intent, tuple(cases), defaults, max_fire_rate)
 
 
 def _case(raw: Any, rule: str, defaults: dict[str, tuple[str, ...]], where: str, display: str) -> Case:
@@ -129,10 +139,11 @@ def _case(raw: Any, rule: str, defaults: dict[str, tuple[str, ...]], where: str,
             raise SuiteError(f"{where}: output_contains needs the case to expect `{rule}` to fire")
         expectations.append(ExpectOutput(tuple(needles)))
 
-    event = {**defaults, **_event(doc.get("event", {}), f"{where}: event")}
+    given = parse_event(doc.get("event", {}), f"{where}: event")
+    event = {**defaults, **given}
     if len(event.get("evt.type", ())) != 1:
         raise SuiteError(f"{where}: needs exactly one evt.type; set it in `defaults` or the case event")
-    return Case(f"{display}::{name}", name, derive(event), tuple(expectations))
+    return Case(f"{display}::{name}", name, derive(event), tuple(expectations), given)
 
 
 def _expects_fire(expectations: list[Expectation], rule: str) -> bool:
@@ -142,10 +153,10 @@ def _expects_fire(expectations: list[Expectation], rule: str) -> bool:
     )
 
 
-def _event(raw: Any, where: str) -> dict[str, tuple[str, ...]]:
+def parse_event(raw: Any, where: str) -> dict[str, tuple[str, ...]]:
     if not isinstance(raw, dict):
         raise SuiteError(f"{where}: expected a mapping of field to value")
-    return {str(field): _values(value, f"{where}.{field}") for field, value in raw.items()}
+    return {str(key): _values(value, f"{where}.{key}") for key, value in raw.items()}
 
 
 def _values(value: Any, where: str) -> tuple[str, ...]:

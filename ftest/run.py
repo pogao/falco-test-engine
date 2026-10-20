@@ -7,12 +7,14 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from ftest import noise
 from ftest.cond import render
 from ftest.config import Config, JevMode
+from ftest.corpus import builtin, load_corpus
 from ftest.coverage import consistency, coverage
 from ftest.diff import RuleChange, diff_rules, untested
+from ftest.engine import CaseError, EngineError, EngineResult, JobCase, Rule, build_job, run_engine
 from ftest.engine import CaseRun as EngineCaseRun
-from ftest.engine import EngineError, EngineResult, JobCase, Rule, build_job, run_engine
 from ftest.explain import explain
 from ftest.jev import CaseBrief, JevClient, RuleBrief, credentials, review
 from ftest.lint import CaseRun, RuleView, lint_rule, load_warnings, work
@@ -27,8 +29,10 @@ def run(
     cfg: Config, strict: bool = False, use_jev: bool = True, env: Mapping[str, str] = os.environ
 ) -> RunReport:
     suites = load_suites(cfg.tests, cfg.root)
+    ordinary = builtin() + load_corpus(cfg.noise.corpus, cfg.root) if cfg.noise.enabled else ()
     startup = check_startup(cfg.startup.enabled, cfg.startup.falco_config, cfg.rules_files)
-    job = build_job(cfg.rules_files, cfg.plugins, [JobCase(c, s.rule) for s in suites for c in s.cases])
+    cases = [JobCase(c, s.rule) for s in suites for c in s.cases] + [JobCase(e, None) for e in ordinary]
+    job = build_job(cfg.rules_files, cfg.plugins, cases)
     common = dict(startup=startup, strict=strict, jev_gate=cfg.jev.gate)
     try:
         full = run_engine(cfg.engine_binary, job)
@@ -43,38 +47,69 @@ def run(
             findings=(),
             jev="not run",
             other_rules=0,
+            noise="not run",
             **common,
         )
 
-    base, changes = _compare(cfg, full)
+    base_line, changes, base = _compare(cfg, full, ordinary)
     sections = analyze(full, suites, changes, cfg.lint_disable) if full.load.ok else ()
+    noise_line, sections = _noise(cfg, suites, sections, ordinary, full, base)
     jev_line, sections = _jev(cfg, use_jev, env, suites, sections, full)
     return RunReport(
         versions=full.versions,
         load=full.load,
         engine_error=None,
-        base=base,
+        base=base_line,
         changes=changes,
         sections=sections,
         findings=tuple(load_warnings(full.load, cfg.lint_disable)),
         jev=jev_line,
         other_rules=max(len(full.rules) - sum(1 for s in sections if s.loaded), 0),
+        noise=noise_line,
         **common,
     )
 
 
-def _compare(cfg: Config, full: EngineResult) -> tuple[str, tuple[RuleChange, ...]]:
+def _compare(
+    cfg: Config, full: EngineResult, ordinary: tuple[Case, ...]
+) -> tuple[str, tuple[RuleChange, ...], EngineResult | None]:
+    """The base rules see the same ordinary events, so the noise check can compare before and after."""
     if not cfg.base_rules_files:
-        return "no base_rules_files configured", ()
+        return "no base_rules_files configured", (), None
+    job = build_job(cfg.base_rules_files, cfg.plugins, [JobCase(e, None) for e in ordinary])
     try:
-        base = run_engine(cfg.engine_binary, build_job(cfg.base_rules_files, cfg.plugins, []))
+        base = run_engine(cfg.engine_binary, job)
     except EngineError as e:
-        return f"base run failed ({e}); not compared", ()
+        return f"base run failed ({e}); not compared", (), None
     if not base.load.ok:
-        return "base rules failed to load; not compared", ()
+        return "base rules failed to load; not compared", (), None
     if not full.load.ok:
-        return "rules failed to load; not compared", ()
-    return f"compared with {len(base.rules)} base rules", diff_rules(base.rules, full.rules)
+        return "rules failed to load; not compared", (), base
+    return f"compared with {len(base.rules)} base rules", diff_rules(base.rules, full.rules), base
+
+
+def _noise(cfg, suites, sections, ordinary, full, base) -> tuple[str, tuple[RuleSection, ...]]:
+    if not cfg.noise.enabled:
+        return "off", sections
+    usable = tuple(e for e in ordinary if isinstance(full.cases.get(e.id), EngineCaseRun))
+    rejected = [r for e in ordinary if isinstance(r := full.cases.get(e.id), CaseError)]
+    checked = []
+    for section in sections:
+        rule = full.rules.get(section.name)
+        if rule is not None:
+            before = None
+            if base is not None and section.name in base.rules:
+                before = (base.rules[section.name], base.cases)
+            limit = noise.budget(section.name, suites, cfg.noise.max_fire_rate)
+            measured = noise.measure(rule, usable, full.cases, before, limit)
+            found = noise.finding(section.name, measured)
+            findings = section.findings + ((found,) if found else ())
+            section = dataclasses.replace(section, noise=measured, findings=findings)
+        checked.append(section)
+    line = f"{len(usable)} ordinary events"
+    if rejected:
+        line += f"; the engine rejected {len(rejected)} (first: {rejected[0].id}: {rejected[0].error})"
+    return line, tuple(checked)
 
 
 def analyze(

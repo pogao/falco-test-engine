@@ -15,6 +15,20 @@ class ConfigError(Exception):
     pass
 
 
+# Share of the ordinary events of a rule's event types that the rule may fire on. Calibrated with
+# scripts/noise_calibration.py on the 315 built-in events (97 execve, 146 openat, 72 connect):
+# - All 25 stock rules and the example rules fire on 0. That is the floor for a correct rule.
+# - One benign false positive is 1.0% of the execs, 0.7% of the opens, 1.4% of the connects. 5% lets a
+#   correct but untuned rule have 3 or 4 of them and still pass.
+# - Inversions that fire broadly fire on 14.4% to 100%: `not` on the package manager list fires on
+#   15.5%, `proc.tty = 0` instead of `!= 0` on 14.4%, the whole condition negated on 100%. 5% leaves a
+#   3x margin below the smallest.
+# What limits it: an inversion can only fire on the corpus events its other conditions allow. Narrow
+# ones (inverting one exception, dropping `container`) fire on 1.4% to 2.1% and pass this check. The
+# mutation score finds those, because they need test cases rather than benign traffic.
+DEFAULT_MAX_FIRE_RATE = 0.05
+
+
 @dataclass(frozen=True)
 class PluginSpec:
     name: str
@@ -42,6 +56,19 @@ class JevSettings:
 
 
 @dataclass(frozen=True)
+class NoiseSettings:
+    enabled: bool
+    max_fire_rate: float
+    corpus: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class MutationSettings:
+    enabled: bool
+    min_score: float | None
+
+
+@dataclass(frozen=True)
 class ReportPaths:
     markdown: Path | None
     json: Path | None
@@ -59,6 +86,8 @@ class Config:
     jev: JevSettings
     report: ReportPaths
     engine_binary: str
+    noise: NoiseSettings
+    mutation: MutationSettings
 
     @property
     def root(self) -> Path:
@@ -76,6 +105,8 @@ _TOP_KEYS = {
     "jev",
     "report",
     "engine",
+    "noise",
+    "mutation",
 }
 
 
@@ -107,6 +138,11 @@ def parse_config(raw: Any, path: Path) -> Config:
     jev = _mapping(doc.get("jev", {}), "jev", {"enabled", "model", "gate"})
     report = _mapping(doc.get("report", {}), "report", {"markdown", "json"})
     engine = _mapping(doc.get("engine", {}), "engine", {"binary"})
+    noise = _mapping(doc.get("noise", {}), "noise", {"enabled", "max_fire_rate", "corpus"})
+    mutation = _mapping(doc.get("mutation", {}), "mutation", {"enabled", "min_score"})
+    corpus = noise.get("corpus", [])
+    if not isinstance(corpus, list) or not all(isinstance(c, str) for c in corpus):
+        raise ConfigError("noise.corpus must be a list of paths")
 
     disable = lint.get("disable", [])
     if not isinstance(disable, list) or not all(isinstance(c, str) for c in disable):
@@ -134,7 +170,25 @@ def parse_config(raw: Any, path: Path) -> Config:
             json=_optional_path(report, "json", "falco-test-report.json", root),
         ),
         engine_binary=str(root / binary) if "/" in binary else binary,
+        noise=NoiseSettings(
+            enabled=_bool(noise, "enabled", True, "noise"),
+            max_fire_rate=fraction(noise.get("max_fire_rate", DEFAULT_MAX_FIRE_RATE), "noise.max_fire_rate"),
+            corpus=tuple(root / c for c in corpus),
+        ),
+        mutation=MutationSettings(
+            enabled=_bool(mutation, "enabled", True, "mutation"),
+            min_score=None
+            if mutation.get("min_score") is None
+            else fraction(mutation["min_score"], "mutation.min_score"),
+        ),
     )
+
+
+def fraction(value: Any, where: str, error: type[Exception] = ConfigError) -> float:
+    """A share between 0 and 1, such as 0.05 for 5%."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+        raise error(f"{where} must be a number from 0 to 1, such as 0.05 for 5%")
+    return float(value)
 
 
 def _plugins(raw: Any) -> tuple[PluginSpec, ...]:
