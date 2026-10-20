@@ -5,7 +5,17 @@ from test_jev import answering, client, stubs  # noqa: F401
 
 from ftest.engine import CaseError, CaseRun, Trace
 from ftest.jev import Verdict
-from ftest.oracle import EVENT_QUESTIONS, EventBrief, Judgment, Stance, Unjudged, events, generated, judge
+from ftest.oracle import (
+    EVENT_QUESTIONS,
+    EventBrief,
+    Judgment,
+    Origin,
+    Stance,
+    Unjudged,
+    events,
+    generated,
+    judge,
+)
 from ftest.strength import Generated, Strength, Survivor
 from ftest.suite import parse_suite
 
@@ -43,7 +53,8 @@ def ran(suite, *results):
 
 
 def brief(matched, expect):
-    return EventBrief("s::c", "c", "s", INTENT, {"evt.type": ("execve",)}, matched, expect)
+    origin = Origin.SUITE if expect is not None else Origin.GENERATED
+    return EventBrief("s::c", "c", "s", INTENT, {"evt.type": ("execve",)}, matched, expect, origin)
 
 
 @pytest.mark.parametrize(
@@ -155,6 +166,6 @@ def test_each_generated_case_is_judged_once_against_its_own_suite():
         "generated::tests/shell.yaml::bash in nginx alerts, with proc.name=zsh",
         "generated::tests/more_shells.yaml::bash in nginx alerts, with proc.name=zsh",
     ]
-    assert (briefs[0].matched, briefs[0].expect, briefs[0].generated) == (False, None, True)
+    assert (briefs[0].matched, briefs[0].expect, briefs[0].origin) == (False, None, Origin.GENERATED)
     assert briefs[0].event["proc.name"] == ("zsh",) and briefs[0].event["container.id"] == ("3ad7b26ded6d",)
     assert generated(zsh_case(shell_suite(None))) is None

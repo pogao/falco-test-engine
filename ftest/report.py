@@ -16,7 +16,7 @@ from ftest.findings import Finding, Severity
 from ftest.jev import JevFailure, JevReview, Verdict
 from ftest.lint import Work
 from ftest.noise import Noise, percent
-from ftest.oracle import EventBrief, Judgment, Stance, Unjudged, word
+from ftest.oracle import EventBrief, Judgment, Origin, Stance, Unjudged, word
 from ftest.outcomes import CaseOutcome
 from ftest.startup import StartupFailed, StartupPassed, StartupResult, StartupSkipped
 from ftest.strength import Generated, Strength
@@ -350,7 +350,7 @@ def _dispute(j: Judgment) -> str:
             f"`{b.name}` fails, and Jev sides with the rule: it reads the intent as {jev} ({j.why}). "
             "Check the case's `expect`."
         )
-    if b.generated:
+    if b.origin is Origin.GENERATED:
         return (
             f"generated case `{b.name}`: the rule says {rule}; Jev reads the intent as {jev} ({j.why}). "
             f"Its `expect` only copies the rule, so this may be a rule bug: if Jev is right, set "
@@ -485,7 +485,7 @@ def _strength_json(strength: Strength) -> dict:
 
 def _event_json(b: EventBrief) -> dict:
     """The event and intent are already in the suites and in the strength section's generated cases."""
-    return {"case": b.name, "suite": b.suite, "origin": "generated" if b.generated else "suite"}
+    return {"case": b.name, "suite": b.suite, "origin": b.origin.value}
 
 
 def _judgment_json(j: Judgment) -> dict:

@@ -63,6 +63,11 @@ _VERDICTS = {
 }
 
 
+class Origin(Enum):
+    SUITE = "suite"
+    GENERATED = "generated"
+
+
 @dataclass(frozen=True)
 class EventBrief:
     """One event for Jev, with what the engine and the suite said about it.
@@ -70,7 +75,8 @@ class EventBrief:
     `event` holds the fields as the suite writes them: its defaults under the case's own values,
     with no derived fields and no trimming to the fields the rule reads, so Jev can see a field the
     rule ignores. `matched` is the engine's verdict for the rule's condition. `expect` is what the
-    suite case says, or None for a generated case, whose `expect` only copies the rule."""
+    suite case says, and None unless `origin` is SUITE: a generated case's `expect` only copies the
+    rule."""
 
     id: str
     name: str
@@ -79,10 +85,7 @@ class EventBrief:
     event: Mapping[str, tuple[str, ...]]
     matched: bool
     expect: bool | None
-
-    @property
-    def generated(self) -> bool:
-        return self.expect is None
+    origin: Origin
 
 
 @dataclass(frozen=True)
@@ -161,7 +164,7 @@ def events(
                 matched = result.traces[rule].result
                 expect = verdicts(case, rule)[0]
                 briefs[case.id] = EventBrief(
-                    case.id, case.name, suite.display, suite.intent, event, matched, expect
+                    case.id, case.name, suite.display, suite.intent, event, matched, expect, Origin.SUITE
                 )
     for survivor in strength.survivors if strength else ():
         if survivor.example is not None and (brief := generated(survivor.example)) is not None:
@@ -177,7 +180,9 @@ def generated(g: Generated) -> EventBrief | None:
     if g.suite.intent is None:
         return None
     event = {**g.suite.defaults, **g.given}
-    return EventBrief(generated_id(g), g.name, g.suite.display, g.suite.intent, event, g.expect, None)
+    return EventBrief(
+        generated_id(g), g.name, g.suite.display, g.suite.intent, event, g.expect, None, Origin.GENERATED
+    )
 
 
 def generated_id(g: Generated) -> str:
