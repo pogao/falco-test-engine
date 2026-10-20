@@ -252,9 +252,11 @@ def _synthesize(original, mutant, leaves, run, flips, target, pool) -> Candidate
     defaults, given = run.suite.defaults, run.case.given
     changes: dict[str, tuple[str, ...] | None] = {}
     for key in dict.fromkeys(leaves.keys[i] for i in flips):
-        wanted = [(leaves.checks[i], target[i]) for i in leaves.by_key[key] if modelable(leaves.checks[i])]
+        on_key = [i for i in leaves.by_key[key] if modelable(leaves.checks[i])]
+        wanted = [(leaves.checks[i], target[i]) for i in on_key if i in flips]
+        kept = [(leaves.checks[i], target[i]) for i in on_key if i not in flips]
         removable = key in given and key not in defaults
-        value = solve(wanted, pool.get(key, ()), removable)
+        value = solve(wanted, pool.get(key, ()), removable, kept)
         if value is None:
             return None
         changes[key] = None if value is ABSENT else (value,)
@@ -269,20 +271,41 @@ def _synthesize(original, mutant, leaves, run, flips, target, pool) -> Candidate
     return Candidate(run, changes, new_given, event)
 
 
-def solve(wanted: Sequence[tuple[Check, bool]], pool: Sequence[str], removable: bool) -> str | _Absent | None:
-    """A value that gives every check on one field its wanted truth value, or None."""
+def solve(
+    wanted: Sequence[tuple[Check, bool]],
+    pool: Sequence[str],
+    removable: bool,
+    kept: Sequence[tuple[Check, bool]] = (),
+) -> str | _Absent | None:
+    """A value that gives every wanted check on one field its truth value, or None.
+
+    `kept` are the field's other checks. A value that keeps them as they are wins; when none
+    exists, they may change too, and the caller recomputes them."""
     candidates: list[Choice] = []
-    for check, truth in wanted:
+    for check, truth in [*wanted, *kept]:
         op = OPERATORS[check.base_op]
         candidates += (op.true_candidates if truth else op.false_candidates)(rhs_values(check))
-    candidates += [*pool, FALLBACK]
-    for value in _distinct(candidates):
-        if value is ABSENT:
-            if removable and not any(truth for _, truth in wanted):
-                return ABSENT
-        elif all(holds(check, (value,)) == truth for check, truth in wanted):
-            return value
+    candidates += [*_composed(wanted), *pool, FALLBACK]
+    for constraints in ([*wanted, *kept], wanted):
+        for value in _distinct(candidates):
+            if value is ABSENT:
+                if removable and not any(truth for _, truth in constraints):
+                    return ABSENT
+            elif all(holds(check, (value,)) == truth for check, truth in constraints):
+                return value
     return None
+
+
+def _composed(wanted: Sequence[tuple[Check, bool]]) -> list[Choice]:
+    """One string that starts, contains, and ends with what several true checks on a field ask."""
+    parts = {"startswith": [], "contains": [], "icontains": [], "endswith": []}
+    for check, truth in wanted:
+        if truth and check.base_op in parts and check.modifier is None:
+            parts[check.base_op].append(rhs_values(check)[0])
+    middle = parts["contains"] + parts["icontains"]
+    if not middle and not (parts["startswith"] and parts["endswith"]):
+        return []
+    return [" ".join([*parts["startswith"][:1], *middle, *parts["endswith"][:1]])]
 
 
 def _distinct(values: Sequence[Choice]) -> Iterator[Choice]:

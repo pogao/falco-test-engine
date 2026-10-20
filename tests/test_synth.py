@@ -67,6 +67,26 @@ def test_one_value_satisfies_every_check_on_its_field():
     assert solve([(check("=", ("a",)), True), (check("=", ("b",)), True)], [], removable=False) is None
 
 
+def test_other_checks_on_the_field_stay_as_they_are_when_a_value_allows_it():
+    wanted = [(check("=", ("/etc/pam.d",)), True)]
+    keep_false = [(check("in", ("/etc/sudoers.d", "/etc/pam.d")), False)]
+    assert solve(wanted, [], removable=False, kept=keep_false) == "/etc/pam.d"
+    keep_true = [(check("startswith", ("/etc",)), True)]
+    assert solve([(check("endswith", ("pam.d",)), True)], ["/etc/pam.d", "/opt/pam.d"], False, keep_true) == (
+        "/etc/pam.d"
+    )
+
+
+def test_several_true_string_checks_get_one_composed_value():
+    wanted = [
+        (check("startswith", ("-e",)), True),
+        (check("contains", ("getpwnam(",)), True),
+        (check("contains", ("/usr/bin/mandb",)), True),
+    ]
+    value = solve(wanted, [], removable=False)
+    assert value is not None and all(holds(c, (value,)) for c, _ in wanted)
+
+
 def test_unsetting_a_field_needs_every_check_false_and_a_field_the_case_owns():
     exists = [(check("exists", ()), False)]
     assert solve(exists, [], removable=True) is ABSENT
