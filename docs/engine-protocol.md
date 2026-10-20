@@ -6,13 +6,13 @@
 falco-test-engine --job job.json      # or job on stdin
 ```
 
-Exit code 0 means the job was processed, even if the rules failed to load (load errors are data). Exit code 2 means the harness itself failed (unreadable job, plugin failed to load). On exit code 2 stdout is `{"fatal": "<message>"}`.
+Exit code 0 means the job was processed, even if the rules failed to load (load errors are data). Exit code 2 means the harness itself failed (unreadable or malformed job, unreadable rules file, plugin failed to load or init). On exit code 2 stdout is `{"fatal": "<message>"}`.
 
 ## How evaluation works
 
 Rules are loaded, resolved, and compiled by the unmodified Falco 0.45.1 rule loader against the real field schema: the libsinsp syscall filterchecks plus the filterchecks of each loaded plugin (the container plugin supplies `container.*` and `k8s.*`). Each filtercheck is wrapped so that field extraction reads values from the test case instead of the kernel. Parsing, operators, list and macro resolution, exceptions, overrides, transformers, comparison semantics, and the event-type index are all Falco's.
 
-Two fields get special handling because libsinsp gives them "any of" semantics: the unindexed ancestor fields (`proc.aname`, `proc.apid`, `proc.aexe`, `proc.aexepath`, `proc.acmdline`) and the client-or-server fd fields (`fd.ip`, `fd.port`, `fd.net`, `fd.proto`). When a case supplies several values for one of these non-list fields, the check is true if it is true for any one value, as libsinsp does.
+Two fields get special handling because libsinsp gives them "any of" semantics: the unindexed ancestor fields (`proc.aname`, `proc.apid`, `proc.aexe`, `proc.aexepath`, `proc.acmdline`) and the client-or-server fd fields (`fd.ip`, `fd.port`, `fd.net`, `fd.proto`). When a case supplies several values for one of these non-list fields, the check is true if it is true for any one value, as libsinsp does. The engine applies the same rule to every non-list field. For the other fields Falco extracts at most one value, so several values describe an event Falco never produces. Several values for a field that is compared against another field (`val(...)`) are a case error.
 
 A field the rule reads but the case does not supply is unavailable, as when Falco cannot extract it. The comparison is false, so `not` over it is true. Such fields are reported in `missing_fields`.
 
@@ -44,6 +44,7 @@ A field the rule reads but the case does not supply is unavailable, as when Falc
 - Every field value is a list of strings. A single value is a one-element list.
 - `source` is `syscall`. The event code comes from `evt.type`, which syscall cases must set.
 - `trace_rules` names the rules whose leaf-level evaluation the engine reports for this case.
+- Optional keys and their defaults: `plugins` `[]`, `init_config` `""`, `describe` `false`, `cases` `[]`, `source` `"syscall"`, `trace_rules` `[]`.
 
 ## Result
 
@@ -88,11 +89,13 @@ A field the rule reads but the case does not supply is unavailable, as when Falc
 }
 ```
 
-- `rules` lists every loaded rule, enabled or not, when load succeeded.
-- `evttypes` is the set of syscall event names the rule's compiled condition can match. An empty list means the condition can never match.
-- `matched_rules` is every enabled rule that fires on the case, from `falco_engine::process_event` over the default ruleset with the all-matches strategy.
-- `traces[rule].result` is the rule's compiled filter run on the case. `leaves[i]` is the truth value of compiled-AST check `i`, evaluated on its own, without short-circuiting. The Python side recomputes `result` from `leaves` and the AST and flags any disagreement.
-- `unknown_fields` lists case field names Falco does not know. A case with unknown fields, an unparseable value, or no `evt.type` has a non-null `error` and no other results.
+- `load.results` stops at the first file that fails, as Falco does. When load fails, `rules` and `cases` are empty and `describe` is omitted.
+- `plugin_requirements` is reported but does not gate evaluation.
+- `rules` lists every loaded rule, enabled or not, when load succeeded. `condition_raw_ast` is null when the raw condition only parses after Falco substitutes its lists.
+- `evttypes` is the set of syscall event names the rule's compiled condition can match, sorted, from libsinsp's `event_set_to_names` (a generic event expands to every generic syscall name). An empty list means the condition can never match.
+- `matched_rules` is every enabled rule that fires on the case, from `falco_engine::process_event` over the default ruleset with the all-matches strategy. `output` is the rule's message as Falco formats it, without the time and priority prefix. A field the case omits prints as `<NA>`. A non-list field with several values prints its first value.
+- `traces[rule].result` is the rule's compiled filter run on the case. `leaves[i]` is the truth value of compiled-AST check `i`, evaluated on its own, without short-circuiting. The Python side recomputes `result` from `leaves` and the AST and flags any disagreement. `missing_fields` is every field the compiled condition reads that the case does not supply, sorted.
+- `unknown_fields` lists case field names Falco does not know. A case has a non-null `error` when it has unknown fields, an unparseable value, a `source` other than `syscall`, or an unknown rule in `trace_rules`. It also has one when `evt.type` is missing, is not an event name, or has more than one value. Such a case has empty `matched_rules` and `traces` and no other results.
 
 ## AST
 
@@ -105,7 +108,8 @@ Nodes are JSON objects with a `type`:
 | `identifier` | `name`: macro name (raw AST only) |
 | `check` | `id` (compiled AST only, depth-first order from 0), `op`, `lhs`, and `rhs` unless `op` is `exists` |
 | `field` | `field`, `arg` (string or null) |
-| `transformer` | `name` (`tolower`, `val`, ...), `args`: nodes |
+| `transformer` | `name` (`tolower`, `val`, ...), `args`: nodes, `arg` (string or null) |
+| `transformer_list` | `children`: nodes (a parenthesized list of fields or values inside a transformer) |
 | `value` | `value`: string |
 | `list` | `values`: strings |
 
