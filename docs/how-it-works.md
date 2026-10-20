@@ -53,7 +53,7 @@ The default budget, 5%, comes from running every loaded rule over the corpus wit
 The check has limits, and they follow from what it measures:
 
 - It counts kinds of activity, not their volume. A health check appears once per pod here and runs every ten seconds in production, so a rule that fires on it looks rare here and is loud there.
-- It covers `execve`, `openat`, and `connect` only. Six stock rules watch event types the corpus lacks, such as `ptrace` and `symlink`, so their 0 says nothing. Add corpus files for the activity your rules watch.
+- It covers `execve`, `openat`, and `connect` only. Seven stock rules watch event types the corpus lacks, such as `ptrace` and `symlink`, so their 0 says nothing. Add corpus files for the activity your rules watch.
 - It misses an inversion that only matters for a few ordinary events. Dropping `container` from the example package-manager rule fires on 2 of the 97 process starts, the host's security patching. Test cases have to catch that, which is the next section.
 
 ## Why ftest mutates rules
