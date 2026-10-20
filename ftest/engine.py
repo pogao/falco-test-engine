@@ -159,7 +159,7 @@ class EngineResult:
 @dataclass(frozen=True)
 class JobCase:
     case: Case
-    rule: str
+    rule: str | None
 
 
 def build_job(rules_files: Sequence[Path], plugins: Sequence[PluginSpec], cases: Sequence[JobCase]) -> dict:
@@ -174,7 +174,7 @@ def build_job(rules_files: Sequence[Path], plugins: Sequence[PluginSpec], cases:
                 "id": c.case.id,
                 "source": "syscall",
                 "fields": {k: list(v) for k, v in c.case.event.items()},
-                "trace_rules": [c.rule],
+                "trace_rules": [c.rule] if c.rule else [],
             }
             for c in cases
         ],

@@ -64,8 +64,12 @@ def test_run_passes_on_the_example_rules(repo, capsys):
     assert doc["result"] == "pass" and doc["exit_code"] == 0
     assert {r["name"] for r in doc["rules"]} == {SHELL, PKG, META}
 
-    full_job, base_job = received_jobs(state)
-    assert base_job["cases"] == [] and base_job["rules_files"] == ["/etc/falco/falco_rules.yaml"]
+    full_job, base_job, generated_job = received_jobs(state)
+    assert generated_job["rules_files"] == full_job["rules_files"]
+    assert all(c["id"].startswith(f"generated::{c['trace_rules'][0]}::") for c in generated_job["cases"])
+    assert base_job["rules_files"] == ["/etc/falco/falco_rules.yaml"]
+    assert base_job["cases"] and all(c["trace_rules"] == [] for c in base_job["cases"])
+    assert {c["id"] for c in base_job["cases"]} < {c["id"] for c in full_job["cases"]}
     pip = next(c for c in full_job["cases"] if c["id"].endswith("::pip from sh"))
     assert pip["trace_rules"] == [PKG]
     assert pip["fields"]["proc.pname"] == ["sh"] and pip["fields"]["proc.aname[2]"] == ["runc"]
@@ -165,6 +169,8 @@ def test_load_errors_fail_the_run_and_are_listed(repo):
     assert "**FAIL**: rules failed to load." in md
     assert f"- `LOAD_ERR_COMPILE_CONDITION` {cfg.rules_files[1]}:10 rule `{PKG}`: unexpected token" in md
     assert "- Tests: not run: rules did not load." in md
+    assert "- Noise: not run: rules did not load." in md
+    assert "- Test strength: not run: rules did not load." in md
 
 
 def test_engine_fatal_fails_the_run(repo):

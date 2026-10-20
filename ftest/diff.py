@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ftest.cond import render
-from ftest.engine import Rule
+from ftest.engine import Macro, Rule
 from ftest.findings import Finding, Severity
 
 
@@ -28,6 +28,11 @@ def diff_rules(base: Mapping[str, Rule], full: Mapping[str, Rule]) -> tuple[Rule
             changes.append(RuleChange(name, "changed", details))
     changes.extend(RuleChange(name, "removed") for name in base if name not in full)
     return tuple(changes)
+
+
+def changed_macros(base: Mapping[str, Macro], full: Mapping[str, Macro]) -> frozenset[str]:
+    """Macros the user's files define or redefine: the ones whose insides are theirs to test."""
+    return frozenset(n for n, m in full.items() if n not in base or base[n].condition != m.condition)
 
 
 def _details(before: Rule, after: Rule) -> tuple[str, ...]:
