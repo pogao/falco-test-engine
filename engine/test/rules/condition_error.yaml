@@ -1,0 +1,5 @@
+- rule: Broken condition
+  desc: The condition does not parse.
+  condition: evt.type = execve and (proc.name = bash
+  output: never loads
+  priority: WARNING

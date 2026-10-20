@@ -1,0 +1,56 @@
+{
+  "rules_files": ["/opt/falco/etc/falco/falco_rules.yaml", "rules/ancestors.yaml"],
+  "plugins": [
+    {"name": "container", "library_path": "/opt/falco/usr/share/falco/plugins/libcontainer.so", "init_config": "{}"}
+  ],
+  "describe": true,
+  "cases": [
+    {
+      "id": "shell with tty",
+      "source": "syscall",
+      "fields": {
+        "evt.type": ["execve"],
+        "evt.dir": ["<"],
+        "proc.name": ["bash"],
+        "proc.cmdline": ["bash -i"],
+        "proc.tty": ["34816"],
+        "container.id": ["abc123456789"],
+        "user.name": ["root"]
+      },
+      "trace_rules": ["Terminal shell in container"]
+    },
+    {
+      "id": "shell without tty",
+      "source": "syscall",
+      "fields": {
+        "evt.type": ["execve"],
+        "evt.dir": ["<"],
+        "proc.name": ["bash"],
+        "proc.cmdline": ["bash -i"],
+        "proc.tty": ["0"],
+        "container.id": ["abc123456789"],
+        "user.name": ["root"]
+      },
+      "trace_rules": ["Terminal shell in container"]
+    },
+    {
+      "id": "bash among ancestors",
+      "source": "syscall",
+      "fields": {
+        "evt.type": ["execve"],
+        "proc.name": ["ls"],
+        "proc.aname": ["sshd", "bash"]
+      },
+      "trace_rules": ["Ancestor is bash", "Ancestor is zsh"]
+    },
+    {
+      "id": "misspelled field",
+      "source": "syscall",
+      "fields": {
+        "evt.type": ["execve"],
+        "proc.nmae": ["bash"]
+      },
+      "trace_rules": []
+    }
+  ]
+}
