@@ -1,10 +1,13 @@
 """End to end: `ftest` against a fake `falco-test-engine` on PATH that evaluates a sample world."""
 
+import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -14,10 +17,12 @@ from samples import META, PKG, SHELL, World, broken_world
 from test_diff_and_startup import fake_falco
 from test_jev import Stub, answering
 
+import ftest
 from ftest.cli import main
-from ftest.config import load_config
+from ftest.config import ConfigError, load_config, parse_config
+from ftest.fixtures import derive
 from ftest.strength import verdicts
-from ftest.suite import load_suites
+from ftest.suite import SuiteError, load_suites, parse_suite
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -105,18 +110,94 @@ def test_run_fails_on_the_broken_rules_and_says_why(repo, capsys):
     assert main(["run", "-c", "falco-test.broken.yaml"]) == 1
     md = report(repo)
     assert "**FAIL**: 6 test cases failed." in md
-    assert f"- FAIL `yum on the host is out of scope`: expected `{PKG}` not to fire; it fired." in md
-    assert f"- FAIL `pip from sh`: expected `{PKG}` to fire; it did not." in md
-    assert f"- FAIL `other acme images still alert`: expected `{SHELL}` to fire; it did not." in md
+    # The broken PKG condition parses as `(spawned_process and container and proc.name = apt)
+    # or (proc.name = yum and not container.image.repository = ghcr.io/acme/ci-runner)`.
+    assert (
+        f"- FAIL `yum on the host is out of scope`: expected `{PKG}` not to fire; it fired.\n"
+        "  - `proc.name = yum` was true, in the rule condition.\n"
+        "  - `container.image.repository = ghcr.io/acme/ci-runner` was false, in the rule condition.\n"
+    ) in md
+    assert (
+        f"- FAIL `pip from sh`: expected `{PKG}` to fire; it did not.\n"
+        "  - `proc.name = apt` was false, in the rule condition.\n"
+        "  - `proc.name = yum` was false, in the rule condition.\n"
+    ) in md
+    assert (
+        "- FAIL `no other rule fires on apt-get in a container`: expected rule set differs; "
+        f"did not fire: `{PKG}`.\n"
+        "  - `proc.name = apt` was false, in the rule condition.\n"
+        "  - `proc.name = yum` was false, in the rule condition.\n"
+    ) in md
+    assert (
+        f"- FAIL `other acme images still alert`: expected `{SHELL}` to fire; it did not.\n"
+        "  - `container.image.repository startswith ghcr.io/acme` was true, "
+        "in macro `user_expected_terminal_shell_in_container_conditions`.\n"
+    ) in md
     assert "- Readiness: not ready (see the failures above)." in md
     assert "**Readiness.**" not in md
     doc = json.loads((repo / "falco-test-report.json").read_text())
     assert doc["readiness"] == {"status": "not_ready", "reasons": ["6 test cases failed"]}
+    outcomes = {o["name"]: o for r in doc["rules"] for o in r["outcomes"]}
+    assert outcomes["pip from sh"]["why"] == [
+        {"check": "proc.name = apt", "value": False, "where": "in the rule condition", "unset": []},
+        {"check": "proc.name = yum", "value": False, "where": "in the rule condition", "unset": []},
+    ]
+    assert sum(not o["passed"] for o in outcomes.values()) == 6
+    assert all((o["why"] == []) == o["passed"] for o in outcomes.values())
     out = capsys.readouterr().out
     assert out.startswith("ftest: FAIL (6 test cases failed)")
     assert "  ready    not ready (see the failures above)" in out
     assert f"  FAIL     {PKG}: 1/6 cases" in out
     assert "; ready " not in out
+
+
+def test_failures_name_unset_fields_and_exception_checks(repo):
+    world = World.full()
+    world.rules[PKG]["exceptions"] = ["proc.pname = make"]
+    world.rules[PKG]["exception_names"] = ["build_tools"]
+    engine(repo, world, World.stock())
+    nginx = {"evt.type": "execve", "container.id": "9f2c51b0a1d4", "container.image.repository": "nginx"}
+    suite = {
+        "rule": PKG,
+        "cases": [
+            {
+                "name": "apt-get with no ancestors given",
+                "expect": "match",
+                "event": {**nginx, "proc.name": "apt-get", "container.id": "host"},
+            },
+            {
+                "name": "apt from gmake is a build step",
+                "expect": "no_match",
+                "event": {**nginx, "proc.name": "apt", "proc.aname": "bash", "proc.pname": "gmake"},
+            },
+        ],
+    }
+    (repo / "tests" / "why.yaml").write_text(yaml.safe_dump(suite))
+    assert main(["run"]) == 1
+    md = report(repo)
+    assert (
+        f"- FAIL `apt-get with no ancestors given`: expected `{PKG}` to fire; it did not.\n"
+        "  - `proc.aname in (sh, bash)` was false, in the rule condition. The case does not set `proc.aname`.\n"
+        "  - `container.id != host` was false, in macro `container`.\n"
+    ) in md
+    assert (
+        f"- FAIL `apt from gmake is a build step`: expected `{PKG}` not to fire; it fired.\n"
+        "  - `evt.type in (execve, execveat)` was true, in macro `spawned_process`.\n"
+        "  - `proc.aname in (sh, bash)` was true, in the rule condition.\n"
+        "  - `container.id != host` was true, in macro `container`.\n"
+        "  - `proc.name in (package_managers)` was true, in the rule condition.\n"
+        "  - `container.image.repository = ghcr.io/acme/ci-runner` was false, in the rule condition.\n"
+        "  - `proc.pname = make` was false, in exception `build_tools`.\n"
+    ) in md
+    doc = json.loads((repo / "falco-test-report.json").read_text())
+    outcomes = {o["name"]: o for r in doc["rules"] for o in r["outcomes"]}
+    assert outcomes["apt-get with no ancestors given"]["why"][0] == {
+        "check": "proc.aname in (sh, bash)",
+        "value": False,
+        "where": "in the rule condition",
+        "unset": ["proc.aname"],
+    }
+    assert all(o["why"] == [] for o in outcomes.values() if o["passed"])
 
 
 def test_readiness_scores_only_the_parts_that_were_measured(repo):
@@ -393,3 +474,59 @@ def test_python_dash_m_entry_point(repo):
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.startswith("ftest: PASS")
+
+
+@pytest.fixture
+def guide(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main(["guide"]) == 0, "`ftest guide` must work with no falco-test.yaml"
+    return capsys.readouterr().out
+
+
+def allowed_keys(error: type[Exception], parse, raw) -> list[str]:
+    with pytest.raises(error) as e:
+        parse(raw)
+    return ast.literal_eval(str(e.value).split("allowed: ", 1)[1])
+
+
+def test_help_points_to_the_guide(capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--help"])
+    assert e.value.code == 0
+    assert "ftest guide" in capsys.readouterr().out
+
+
+def test_guide_names_every_subcommand(guide, capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    commands = re.search(r"\{([\w,]+)\}", capsys.readouterr().out).group(1).split(",")
+    assert "guide" in commands
+    assert [c for c in commands if f"ftest {c}" not in guide] == []
+
+
+def test_guide_names_every_finding_code(guide):
+    sources = Path(ftest.__file__).parent.glob("*.py")
+    codes = {code for p in sources for code in re.findall(r"FTE\d{3}", p.read_text())}
+    assert len(codes) > 10
+    assert sorted(c for c in codes if c not in guide) == []
+
+
+def test_guide_names_every_suite_and_config_key(guide):
+    suite = partial(parse_suite, path=Path("s.yaml"), display="s.yaml")
+    config = partial(parse_config, path=Path("/r/falco-test.yaml"))
+    keys = allowed_keys(SuiteError, suite, {"unknown_key": 1})
+    keys += allowed_keys(SuiteError, suite, {"rule": "r", "cases": [{"unknown_key": 1}]})
+    keys += allowed_keys(ConfigError, config, {"unknown_key": 1})
+    assert {"max_fire_rate", "output_contains", "rules_files"} <= set(keys)
+    assert [k for k in keys if f"`{k}" not in guide] == []
+
+
+def test_guide_names_every_derived_field(guide):
+    own = ("proc.name", "proc.pid", "proc.exe", "proc.exepath", "proc.cmdline")
+    ancestors = ("proc.aname", "proc.apid", "proc.aexe", "proc.aexepath", "proc.acmdline")
+    probe = {f: ("bash",) for f in own} | {f: ("sh", "runc") for f in ancestors}
+    probe |= {"fd.cip": ("10.0.0.1",), "fd.sip": ("169.254.169.254",), "fd.cport": ("41000",)}
+    probe |= {"fd.sport": ("80",), "fd.cproto": ("tcp",), "fd.sproto": ("tcp",), "fd.name": ("/etc/passwd",)}
+    derived = {re.sub(r"\[\d+\]$", "[N]", f) for f in derive(probe) if f not in probe}
+    assert {"proc.pname", "proc.aname[N]", "fd.net", "fd.filename"} <= derived
+    assert sorted(f for f in derived if f"`{f}`" not in guide) == []

@@ -18,6 +18,9 @@ ftest = "ftest.cli:main"
 [tool.setuptools]
 packages = ["ftest"]
 
+[tool.setuptools.package-data]
+ftest = ["guide.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]

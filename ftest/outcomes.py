@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import difflib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from ftest.engine import CaseError, CaseResult, CaseRun
+from ftest.engine import CaseError, CaseResult, CaseRun, Rule
+from ftest.shape import Shape
 from ftest.suite import Case, Expectation, ExpectExactRules, ExpectFires, ExpectOutput
+from ftest.why import Decider, deciders
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,7 @@ class CaseOutcome:
     actual: str
     failures: tuple[str, ...]
     warnings: tuple[str, ...]
+    why: tuple[Decider, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -29,17 +32,19 @@ def judge(
     case: Case,
     rule: str,
     result: CaseResult | None,
-    known_rules: Iterable[str],
+    known_rules: Mapping[str, Rule],
     known_fields: Iterable[str],
+    shape: Shape | None = None,
 ) -> CaseOutcome:
     expected = "; ".join(_describe(e) for e in case.expectations)
 
-    def outcome(actual: str, failures: list[str], warnings: tuple[str, ...] = ()) -> CaseOutcome:
-        return CaseOutcome(case.id, case.name, rule, expected, actual, tuple(failures), warnings)
+    def outcome(
+        actual: str, failures: list[str], warnings: tuple[str, ...] = (), why: tuple[Decider, ...] = ()
+    ) -> CaseOutcome:
+        return CaseOutcome(case.id, case.name, rule, expected, actual, tuple(failures), warnings, why)
 
     if result is None:
         return outcome("no result", ["the engine returned no result for this case"])
-    known_rules = set(known_rules)
     if known_rules and rule not in known_rules:
         return outcome("rule not loaded", [f"rule `{rule}` is not loaded{_did_you_mean(rule, known_rules)}"])
     if isinstance(result, CaseError):
@@ -53,8 +58,12 @@ def judge(
     if trace and trace.missing_fields:
         missing = ", ".join(f"`{f}`" for f in trace.missing_fields)
         warnings = (f"the rule read fields this case does not set: {missing}",)
+    why = ()
+    misfired = any(_on_firing(e, rule, fired) for e in case.expectations)
+    if misfired and shape and trace and known_rules[rule].enabled:
+        why = deciders(known_rules[rule], shape, trace)
     actual = f"fired: {', '.join(sorted(fired))}" if fired else "nothing fired"
-    return outcome(actual, failures, warnings)
+    return outcome(actual, failures, warnings, why)
 
 
 def _check(expectation: Expectation, rule: str, run: CaseRun, fired: frozenset[str]) -> str | None:
@@ -82,6 +91,16 @@ def _check(expectation: Expectation, rule: str, run: CaseRun, fired: frozenset[s
             if absent:
                 return f"output lacks {', '.join(repr(n) for n in absent)}: {alert.output!r}"
     return None
+
+
+def _on_firing(expectation: Expectation, rule: str, fired: frozenset[str]) -> bool:
+    """Whether the expectation fails on whether the case's own rule fired."""
+    match expectation:
+        case ExpectFires(fires):
+            return fires != (rule in fired)
+        case ExpectExactRules(rules):
+            return (rule in rules) != (rule in fired)
+    return False
 
 
 def _describe(expectation: Expectation) -> str:

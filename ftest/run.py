@@ -17,7 +17,7 @@ from ftest.engine import CaseRun as EngineCaseRun
 from ftest.explain import explain
 from ftest.jev import JevClient, RuleBrief, credentials, review
 from ftest.lint import CaseRun, RuleView, lint_rule, load_warnings, work
-from ftest.outcomes import CaseOutcome, judge
+from ftest.outcomes import judge
 from ftest.report import RuleSection, RunReport, markdown, to_json
 from ftest.shape import shape_of
 from ftest.startup import check_startup
@@ -199,14 +199,16 @@ def analyze(
     sections = []
     for name in names:
         cases = [c for s in suites if s.rule == name for c in s.cases]
-        outcomes = tuple(judge_case(full, c, name) for c in cases)
         rule = full.rules.get(name)
+        shape = shape_of(rule) if rule is not None else None
+        outcomes = tuple(
+            judge(c, name, full.cases.get(c.id), full.rules, full.known_fields, shape) for c in cases
+        )
         if rule is None:
             sections.append(
                 RuleSection(name, "", False, False, by_change.get(name), (), outcomes, None, (), None)
             )
             continue
-        shape = shape_of(rule)
         runs = []
         for c in cases:
             result = full.cases.get(c.id)
@@ -236,10 +238,6 @@ def analyze(
             )
         )
     return tuple(sections)
-
-
-def judge_case(full: EngineResult, case: Case, rule: str) -> CaseOutcome:
-    return judge(case, rule, full.cases.get(case.id), full.rules, full.known_fields)
 
 
 def jev_client(settings: JevSettings, env: Mapping[str, str]) -> JevClient | str:

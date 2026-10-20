@@ -22,6 +22,7 @@ from ftest.oracle import EventBrief, Judgment, Origin, Reading, Stance, Triaged,
 from ftest.outcomes import CaseOutcome
 from ftest.startup import StartupFailed, StartupPassed, StartupResult, StartupSkipped
 from ftest.strength import Generated, Strength
+from ftest.why import Decider
 
 PERFORMANCE_CODES = frozenset({"FTE001", "FTE002", "FTE003", "FTE004", "FTE005", "FTE006", "FTE007"})
 
@@ -606,12 +607,20 @@ def _tests(s: RuleSection) -> list[str]:
     for o in s.outcomes:
         for failure in o.failures:
             lines.append(f"- FAIL `{o.name}`: {failure}.")
+        lines += [f"  - {_decider(d)}" for d in o.why]
     warned = [o for o in s.outcomes if o.warnings]
     for o in warned[:_MAX_WARNINGS]:
         lines.append(f"- warn `{o.name}`: {o.warnings[0]}.")
     if len(warned) > _MAX_WARNINGS:
         lines.append(f"- warn: {len(warned) - _MAX_WARNINGS} more cases left fields the rule reads unset.")
     return lines
+
+
+def _decider(d: Decider) -> str:
+    text = f"`{d.check}` was {str(d.value).lower()}, {d.where}."
+    if d.unset:
+        text += f" The case does not set {', '.join(f'`{f}`' for f in d.unset)}."
+    return text
 
 
 def console(report: RunReport, written: list[Path]) -> str:

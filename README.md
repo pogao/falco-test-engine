@@ -7,7 +7,7 @@ Test Falco rules in CI before they reach your clusters. `ftest` answers four que
 3. **Would a backwards rule get through?** Every rule you test, add, or change runs over 315 generated events of ordinary node activity. A rule that fires on many of them fails the run, even if it has no tests. Then `ftest` inverts parts of each rule and checks that your tests notice. For each inversion they miss, it writes the test case that would catch it.
 4. **Can the rules be cheaper?** A linter reads each compiled condition and suggests rewrites. It also says whether each rewrite means exactly the same thing.
 
-After each run you get a short Markdown report. For each rule under test it says what the rule does, which test cases passed, how often it fired on ordinary activity, which inversions the tests would miss, which conditions no test exercised, and what to optimize.
+After each run you get a short Markdown report. For each rule under test it says what the rule does, which test cases passed, how often it fired on ordinary activity, which inversions the tests would miss, which conditions no test exercised, and what to optimize. Under each failing case it lists the checks that decided the rule's verdict, such as a check on a field the case does not set.
 
 Built on Falco 0.45.1 (engine 0.65.0, libs 0.26.1, container plugin 0.7.5).
 
@@ -86,6 +86,22 @@ ftest: FAIL (7 test cases failed)
 3. Fill in the cases, then run `run`.
 
 To see what a rule does and how to optimize it without writing tests, run `describe "<rule name>"`. To write cases for the inversions a rule's tests miss, run `generate "<rule name>"`.
+
+## Use it from an AI agent
+
+An agent in your rules repo sees only `ftest --help`. `ftest guide` prints the rest for it: the work loop, the suite format, how unset and derived fields behave, how to read a failure, exit codes, and the finding codes. It needs no config file:
+
+```sh
+docker run --rm ghcr.io/pogao/falco-test-engine guide
+```
+
+Add one line to the rules repo's `AGENTS.md` or `CLAUDE.md`:
+
+```markdown
+Falco rules are tested with ftest. Run `docker run --rm ghcr.io/pogao/falco-test-engine guide` before writing or fixing a suite.
+```
+
+A test fails when the guide stops naming a subcommand, a finding code, a suite or config key, or a derived field, so the guide changes with the code.
 
 ## Suite files
 
