@@ -5,13 +5,14 @@ from test_jev import answering, client, stubs  # noqa: F401
 
 from ftest.engine import CaseError, CaseRun, Trace
 from ftest.jev import Verdict
-from ftest.oracle import EVENT_QUESTIONS, EventBrief, Judgment, Stance, Unjudged, events, judge
+from ftest.oracle import EVENT_QUESTIONS, EventBrief, Judgment, Stance, Unjudged, events, generated, judge
+from ftest.strength import Generated, Strength, Survivor
 from ftest.suite import parse_suite
 
 INTENT = "Alert on an interactive shell in any container except our CI runner image."
 
 
-def shell_suite(intent=INTENT):
+def shell_suite(intent=INTENT, display="tests/shell.yaml"):
     return parse_suite(
         {
             "rule": "R",
@@ -31,7 +32,7 @@ def shell_suite(intent=INTENT):
             ],
         },
         Path("shell.yaml"),
-        "tests/shell.yaml",
+        display,
     )
 
 
@@ -84,7 +85,7 @@ def test_a_call_against_the_rule_is_a_finding_and_against_only_the_case_a_review
 
 def test_jev_sees_only_the_intent_and_the_authored_event(stubs):  # noqa: F811
     suite = shell_suite()
-    briefs, no_intent = events("R", (suite,), ran(suite, True, False))
+    briefs, no_intent = events("R", (suite,), ran(suite, True, False), None)
     stub = stubs(answering())
     result = judge(client(stub.url), "jev-latest", briefs)
 
@@ -110,24 +111,24 @@ def test_jev_sees_only_the_intent_and_the_authored_event(stubs):  # noqa: F811
 def test_a_suite_without_a_real_intent_is_named_and_not_judged():
     for intent in (None, "TODO say what this rule must catch and what it must ignore."):
         suite = shell_suite(intent)
-        assert events("R", (suite,), ran(suite, True, False)) == ((), ("tests/shell.yaml",))
+        assert events("R", (suite,), ran(suite, True, False), None) == ((), ("tests/shell.yaml",))
 
 
 def test_a_disabled_rule_is_compared_on_what_its_condition_matched():
     suite = shell_suite()
-    briefs, _ = events("R", (suite,), ran(suite, True, False))
+    briefs, _ = events("R", (suite,), ran(suite, True, False), None)
     assert [(b.matched, b.expect) for b in briefs] == [(True, True), (False, False)]
 
 
 def test_cases_the_engine_did_not_trace_get_no_brief():
     suite = shell_suite()
     results = {suite.cases[0].id: CaseError(suite.cases[0].id, "unknown field", ("proc.nme",))}
-    assert events("R", (suite,), results) == ((), ())
+    assert events("R", (suite,), results, None) == ((), ())
 
 
 def test_one_failed_request_costs_only_its_own_event(stubs):  # noqa: F811
     suite = shell_suite()
-    briefs, _ = events("R", (suite,), ran(suite, True, False))
+    briefs, _ = events("R", (suite,), ran(suite, True, False), None)
     allow = answering(lambda state: (0.9, 0.9))
 
     def respond(body):
@@ -138,3 +139,22 @@ def test_one_failed_request_costs_only_its_own_event(stubs):  # noqa: F811
     result = judge(client(stubs(respond).url), "m", briefs)
     assert isinstance(result[0], Unjudged) and result[0].error.startswith("HTTP 500")
     assert isinstance(result[1], Judgment) and result[1].stance is Stance.AGREES
+
+
+def zsh_case(suite):
+    name = "bash in nginx alerts, with proc.name=zsh"
+    return Generated(name, "bash in nginx alerts", suite, {"proc.name": ("zsh",)}, {}, False)
+
+
+def test_each_generated_case_is_judged_once_against_its_own_suite():
+    first, second = shell_suite(), shell_suite(display="tests/more_shells.yaml")
+    shared = zsh_case(first)
+    survivors = (Survivor(None, shared), Survivor(None, shared), Survivor(None, zsh_case(second)))
+    briefs, _ = events("R", (first, second), {}, Strength(0, 3, 3, survivors, None))
+    assert [b.id for b in briefs] == [
+        "generated::tests/shell.yaml::bash in nginx alerts, with proc.name=zsh",
+        "generated::tests/more_shells.yaml::bash in nginx alerts, with proc.name=zsh",
+    ]
+    assert (briefs[0].matched, briefs[0].expect, briefs[0].generated) == (False, None, True)
+    assert briefs[0].event["proc.name"] == ("zsh",) and briefs[0].event["container.id"] == ("3ad7b26ded6d",)
+    assert generated(zsh_case(shell_suite(None))) is None

@@ -6,19 +6,23 @@ import argparse
 import dataclasses
 import difflib
 import json
+import os
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
 
+from ftest import oracle
 from ftest.cond import Check, ListValue, Not, Value, render, walk
 from ftest.config import Config, ConfigError, load_config
 from ftest.engine import EngineError, EngineResult, Rule, build_job, run_engine
 from ftest.explain import explain
 from ftest.lint import RuleView, lint_rule
+from ftest.oracle import Judgment, Stance, Unjudged, word
 from ftest.report import console, exit_code
-from ftest.run import run, write_reports
+from ftest.run import jev_client, run, write_reports
 from ftest.shape import shape_of
 from ftest.strength import Survivor
 from ftest.suite import SuiteError, parse_suite
@@ -43,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     generate_cmd.add_argument("rule")
     generate_cmd.add_argument("-o", "--output", type=Path, help="suite file to write")
+    generate_cmd.add_argument("--no-jev", action="store_true", help="skip Jev's call on each generated case")
     for cmd in (run_cmd, describe_cmd, scaffold_cmd, generate_cmd):
         cmd.add_argument("-c", "--config", type=Path, default=Path("falco-test.yaml"))
 
@@ -60,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             case "scaffold":
                 return _scaffold(cfg, args.rule, args.output)
             case "generate":
-                return _generate(cfg, args.rule, args.output)
+                return _generate(cfg, args.rule, args.output, use_jev=not args.no_jev)
     except (ConfigError, SuiteError, EngineError) as e:
         print(f"ftest: error: {e}", file=sys.stderr)
         return USAGE_ERROR
@@ -112,7 +117,7 @@ def _default_suite_path(cfg: Config, name: str, suffix: str = "") -> Path:
     return tests_dir / (re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") + suffix + ".yaml")
 
 
-def _generate(cfg: Config, name: str, output: Path | None) -> int:
+def _generate(cfg: Config, name: str, output: Path | None, use_jev: bool) -> int:
     _load_rule(cfg, name)
     cfg = dataclasses.replace(
         cfg,
@@ -142,7 +147,7 @@ def _generate(cfg: Config, name: str, output: Path | None) -> int:
     if target.exists():
         print(f"ftest: error: {target} exists; pass -o to choose another file", file=sys.stderr)
         return 1
-    text = generated_suite(name, found)
+    text = generated_suite(name, found, _judge(cfg, found) if use_jev else {})
     parse_suite(yaml.safe_load(text), target, str(target))
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
@@ -150,8 +155,41 @@ def _generate(cfg: Config, name: str, output: Path | None) -> int:
     return 0
 
 
-def generated_suite(rule: str, survivors: list[Survivor]) -> str:
-    """A suite file of generated cases. One source suite lends its defaults; several do not."""
+def _judge(cfg: Config, found: list[Survivor]) -> dict[str, Judgment]:
+    """Jev's judgment of each generated case, by brief id. Prints why there are none, and each dispute."""
+    client = jev_client(cfg.jev, os.environ)
+    if isinstance(client, str):
+        if client != "off":
+            print(f"jev: {client}")
+        return {}
+    for suite in dict.fromkeys(s.example.suite.display for s in found if s.example.suite.intent is None):
+        print(f"jev: {suite} states no `intent`; its generated cases were not judged")
+    briefs = {b.id: b for s in found if (b := oracle.generated(s.example)) is not None}
+    judged = {}
+    for j in oracle.judge(client, cfg.jev.model, list(briefs.values())):
+        if isinstance(j, Unjudged):
+            print(f"jev: `{j.brief.name}`: request failed: {j.error}")
+            continue
+        judged[j.brief.id] = j
+        if j.stance is Stance.DISPUTES_RULE:
+            print(f"- `{j.brief.name}`: {_jev_comment(j)}")
+    return judged
+
+
+def _jev_comment(j: Judgment) -> str:
+    if j.call is None:
+        return f"Jev is unsure here ({j.why})."
+    if j.stance is Stance.AGREES:
+        return f"Jev reads the suite's intent as {word(j.call)} here too ({j.why})."
+    return (
+        f"Jev reads the suite's intent as {word(j.call)} here ({j.why}): likely a rule bug. "
+        f"If Jev is right, set `expect: {word(j.call)}` and fix the rule."
+    )
+
+
+def generated_suite(rule: str, survivors: list[Survivor], judged: Mapping[str, Judgment]) -> str:
+    """A suite file of generated cases, each with Jev's call when `judged` has it. One source suite
+    lends its defaults; several do not."""
     sources = {s.example.suite.display: s.example.suite for s in survivors}
     shared = next(iter(sources.values())) if len(sources) == 1 else None
     lines = [
@@ -177,6 +215,8 @@ def generated_suite(rule: str, survivors: list[Survivor]) -> str:
         lines.append(
             f"  # `expect: {g.verdict}` is what the current rule does here; confirm it is what you want."
         )
+        if (j := judged.get(oracle.generated_id(g))) is not None:
+            lines.append(f"  # {_jev_comment(j)}")
         lines += [f"  {line}" for line in text.splitlines()]
     return "\n".join(lines) + "\n"
 

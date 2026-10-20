@@ -263,7 +263,7 @@ def _jev(cfg, use_jev, env, suites, sections, full) -> tuple[str, tuple[RuleSect
         if section.loaded and section.outcomes:
             rule = full.rules[section.name]
             brief = RuleBrief(rule.name, rule.description, rule.priority, section.what_it_does)
-            briefs, no_intent = oracle.events(section.name, suites, full.cases)
+            briefs, no_intent = oracle.events(section.name, suites, full.cases, section.strength)
             section = dataclasses.replace(
                 section,
                 jev=review(client, cfg.jev.model, brief),

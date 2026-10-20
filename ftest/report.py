@@ -350,6 +350,12 @@ def _dispute(j: Judgment) -> str:
             f"`{b.name}` fails, and Jev sides with the rule: it reads the intent as {jev} ({j.why}). "
             "Check the case's `expect`."
         )
+    if b.generated:
+        return (
+            f"generated case `{b.name}`: the rule says {rule}; Jev reads the intent as {jev} ({j.why}). "
+            f"Its `expect` only copies the rule, so this may be a rule bug: if Jev is right, set "
+            f"`expect: {jev}` and fix the rule."
+        )
     if b.expect == b.matched:
         return (
             f"`{b.name}`: the rule and the case say {rule}; Jev reads the intent as {jev} ({j.why}). "

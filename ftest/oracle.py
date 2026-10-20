@@ -15,7 +15,7 @@ from typing import Any
 
 from ftest.engine import CaseResult, CaseRun
 from ftest.jev import JevClient, JevError, Verdict
-from ftest.strength import verdicts
+from ftest.strength import Generated, Strength, verdicts
 from ftest.suite import Suite
 
 YES_FROM = 0.7
@@ -141,14 +141,14 @@ def word(matches: bool) -> str:
 
 
 def events(
-    rule: str, suites: Sequence[Suite], cases: Mapping[str, CaseResult]
+    rule: str, suites: Sequence[Suite], cases: Mapping[str, CaseResult], strength: Strength | None
 ) -> tuple[tuple[EventBrief, ...], tuple[str, ...]]:
-    """Every suite case the engine traced for `rule`, and the suites for `rule` that state no
-    intent. Cases in those suites get no brief.
+    """Every suite case the engine traced for `rule`, then each distinct generated case, and the
+    suites for `rule` that state no intent. Cases in those suites get no brief.
 
     `matched` is the trace's condition result, not whether an alert fired, so a disabled rule is
     compared on its logic."""
-    briefs = []
+    briefs: dict[str, EventBrief] = {}
     no_intent = []
     for suite in (s for s in suites if s.rule == rule):
         if suite.intent is None:
@@ -160,10 +160,28 @@ def events(
                 event = {**suite.defaults, **case.given}
                 matched = result.traces[rule].result
                 expect = verdicts(case, rule)[0]
-                briefs.append(
-                    EventBrief(case.id, case.name, suite.display, suite.intent, event, matched, expect)
+                briefs[case.id] = EventBrief(
+                    case.id, case.name, suite.display, suite.intent, event, matched, expect
                 )
-    return tuple(briefs), tuple(no_intent)
+    for survivor in strength.survivors if strength else ():
+        if survivor.example is not None and (brief := generated(survivor.example)) is not None:
+            briefs.setdefault(brief.id, brief)
+    return tuple(briefs.values()), tuple(no_intent)
+
+
+def generated(g: Generated) -> EventBrief | None:
+    """The brief for a generated case, or None when its suite states no intent.
+
+    `matched` is `g.expect`. That equals the condition result because generated cases come only
+    from enabled rules."""
+    if g.suite.intent is None:
+        return None
+    event = {**g.suite.defaults, **g.given}
+    return EventBrief(generated_id(g), g.name, g.suite.display, g.suite.intent, event, g.expect, None)
+
+
+def generated_id(g: Generated) -> str:
+    return f"generated::{g.suite.display}::{g.name}"
 
 
 def state(brief: EventBrief) -> dict[str, Any]:
