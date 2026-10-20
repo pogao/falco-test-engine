@@ -1,5 +1,7 @@
 """Test strength and generated cases, end to end through `ftest` against the sample world."""
 
+import json
+
 import yaml
 from samples import META, PKG, World
 from test_cli import engine, repo, report  # noqa: F401
@@ -115,3 +117,16 @@ def test_a_failed_check_of_generated_events_is_reported_not_hidden(repo):  # noq
     fake.write_text(f"{shebang}\n{crash}{rest}")
     assert main(["run"]) == 0
     assert "  Generated events were not checked: engine failed: verification crashed." in report(repo)
+
+
+def test_the_json_report_gives_survivors_as_text_and_cases(repo):  # noqa: F811
+    engine(repo, World.full(), World.stock())
+    weaken(repo)
+    assert main(["run"]) == 0
+    doc = json.loads((repo / "falco-test-report.json").read_text())
+    strength = next(r for r in doc["rules"] if r["name"] == PKG)["strength"]
+    assert (strength["killed"], strength["total"]) == (9, 12)
+    dropped = next(s for s in strength["survivors"] if s["description"] == "dropping macro `container`")
+    assert dropped["kind"] == "drop" and "container.id != host" not in dropped["condition"]
+    assert dropped["generated"]["suite"] == "tests/package_manager_in_container.yaml"
+    assert dropped["generated"]["case"]["event"]["container.id"] == "host"

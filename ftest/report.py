@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 
+from ftest.cond import render
 from ftest.coverage import Coverage
 from ftest.diff import RuleChange
 from ftest.engine import Load, Versions
@@ -401,6 +402,32 @@ def _default(obj):
     raise TypeError(f"not JSON serializable: {type(obj).__name__}")
 
 
+def _strength_json(strength: Strength) -> dict:
+    """Mutants as condition text and generated cases as suite cases; no ASTs or whole suites."""
+    survivors = []
+    for v in strength.survivors:
+        g = v.example
+        survivors.append(
+            {
+                "kind": v.mutant.kind.value,
+                "description": v.mutant.description,
+                "condition": render(v.mutant.ast),
+                "generated": None
+                if g is None
+                else {"suite": g.suite.display, "extends": g.extends, "changes": g.changed, "case": g.case()},
+            }
+        )
+    return {
+        "killed": strength.killed,
+        "total": strength.total,
+        "generated": strength.generated,
+        "score": strength.score,
+        "min_score": strength.min_score,
+        "unchecked": strength.unchecked,
+        "survivors": survivors,
+    }
+
+
 def to_json(report: RunReport) -> str:
     sections = []
     for s in report.sections:
@@ -410,6 +437,7 @@ def to_json(report: RunReport) -> str:
         doc["jev_status"] = (
             None if s.jev is None else ("failed" if isinstance(s.jev, JevFailure) else "reviewed")
         )
+        doc["strength"] = None if s.strength is None else _strength_json(s.strength)
         sections.append(doc)
     startup_status = {StartupPassed: "passed", StartupFailed: "failed", StartupSkipped: "skipped"}
     doc = {
