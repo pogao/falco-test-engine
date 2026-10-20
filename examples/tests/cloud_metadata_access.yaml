@@ -9,6 +9,7 @@ defaults:
   k8s.ns.name: web
   proc.name: curl
   proc.cmdline: curl http://169.254.169.254/latest/meta-data/iam/
+  proc.exepath: /usr/bin/curl
   fd.sport: 80
 cases:
   - name: curl to IMDS
@@ -21,6 +22,9 @@ cases:
   - name: aws-node is allowed
     expect: no_match
     event: {fd.sip: 169.254.169.254, container.image.repository: public.ecr.aws/eks/aws-node}
+  - name: aws-node binary in a sidecar image is allowed
+    expect: no_match
+    event: {fd.sip: 169.254.169.254, proc.name: aws-node, proc.exepath: /usr/bin/aws-node, proc.cmdline: /usr/bin/aws-node --enable-ipv6=false}
   - name: ordinary service traffic
     expect: no_match
     event: {fd.sip: 10.0.12.7}

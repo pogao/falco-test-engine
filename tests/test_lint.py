@@ -158,7 +158,9 @@ def test_work_metric_counts_short_circuit_evaluation():
 
 
 def test_fte006_rewrites_simple_regexes_and_globs():
-    found = codes(lint_rule(example_view(World.full(), META)), "FTE006")
+    found = codes(
+        lint_rule(view('evt.type = connect and not proc.cmdline regex "^/usr/bin/aws-node"')), "FTE006"
+    )
     assert found == [
         (
             "warning",
@@ -231,7 +233,7 @@ def test_fte008_says_why_a_rule_can_never_fire():
 def test_fte009_reports_output_fields_that_rendered_na():
     found = codes(lint_rule(example_view(World.full(), META)), "FTE009")
     assert [m for _, m, _ in found] == [
-        "output field `k8s.pod.name` rendered `<NA>` on matching case(s) `curl to IMDS`, `ECS task metadata endpoint`"
+        "output field(s) `k8s.pod.name` rendered `<NA>` on matching case(s) `curl to IMDS`, `ECS task metadata endpoint`"
     ]
     assert na_fields("a=%x.y b=%(z.w)", "a=<NA> b=1") == ["x.y"]
     assert na_fields("a=%x.y", "unrelated <NA>") == ["(unmatched output)"]

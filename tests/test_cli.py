@@ -51,13 +51,13 @@ def test_run_passes_on_the_example_rules(repo, capsys):
     md = report(repo)
     assert "**PASS**." in md
     assert "- Startup: skipped: no `falco` binary on PATH." in md
-    assert "- Tests: 17 of 17 cases passed across 3 rules." in md
+    assert "- Tests: 18 of 18 cases passed across 3 rules." in md
     assert "- Changes vs base: 1 changed, 2 added, 0 removed." in md
     assert "- 1 other loaded rule unchanged and untested; not analyzed." in md
     assert "- Jev: skipped (set JEV_API_KEY or TYPESAFE_API_KEY to enable)." in md
     assert f"## {PKG}\n\nWARNING, enabled. Added. Tests: 6 of 6 passed. Needs optimizing: yes (FTE005)." in md
     assert f"## {SHELL}\n\nNOTICE, enabled. Changed vs base: condition changed." in md
-    assert "FTE006 (warning): `proc.cmdline regex ^/usr/bin/aws-node` only matches the exact value" in md
+    assert "FTE007 (info): list `metadata_allowed_images` repeats `ghcr.io/acme/node-agent`." in md
     assert "- Work: predicates evaluated on the test cases (not a production timing)" in md
 
     doc = json.loads((repo / "falco-test-report.json").read_text())
@@ -192,7 +192,6 @@ def test_describe_explains_and_lints_one_rule(repo, capsys):
     out = capsys.readouterr().out
     assert out.startswith(f"{META}\n\n- Matches event `connect`.")
     assert "- FTE003 (info): in macro `cloud_metadata_endpoint`" in out
-    assert "  Suggestion: Use `proc.cmdline = /usr/bin/aws-node`." in out
     assert main(["describe", "Cloud metadata acces"]) == 2
     assert f"did you mean '{META}'" in capsys.readouterr().err
 

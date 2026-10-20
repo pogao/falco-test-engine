@@ -30,7 +30,7 @@
     evt.type = connect
     and container
     and cloud_metadata_endpoint
-    and not proc.cmdline regex "^/usr/bin/aws-node"
+    and not proc.exepath = /usr/bin/aws-node
     and not container.image.repository in (metadata_allowed_images)
   output: Metadata service contacted from container (proc=%proc.name cmdline=%proc.cmdline dest=%fd.sip:%fd.sport image=%container.image.repository ns=%k8s.ns.name pod=%k8s.pod.name)
   priority: WARNING

@@ -160,7 +160,7 @@ def test_explain_states_events_terms_macros_and_output(suites):
     lines = explain(res.rules[META], res.macros)
     assert lines[0] == "Matches event `connect`."
     assert "  - `cloud_metadata_endpoint` (fd.sip = 169.254.169.254 or fd.sip = 169.254.170.2)" in lines
-    assert "  - `not proc.cmdline regex ^/usr/bin/aws-node`" in lines
+    assert "  - `not proc.exepath = /usr/bin/aws-node`" in lines
     assert "Priority WARNING, enabled." in lines
     assert any(line.startswith("Output fields: `proc.name`, `proc.cmdline`, `fd.sip`") for line in lines)
     shell = explain(res.rules[SHELL], res.macros)

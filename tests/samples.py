@@ -96,8 +96,8 @@ CUSTOM_RULES = {
     ),
     META: dict(
         condition=(
-            "evt.type = connect and container and cloud_metadata_endpoint and not proc.cmdline regex "
-            '"^/usr/bin/aws-node" and not container.image.repository in (metadata_allowed_images)'
+            "evt.type = connect and container and cloud_metadata_endpoint and not proc.exepath = "
+            "/usr/bin/aws-node and not container.image.repository in (metadata_allowed_images)"
         ),
         desc="A containerized process connected to the cloud instance metadata service.",
         output=(

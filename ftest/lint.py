@@ -594,18 +594,19 @@ def _na_outputs(view: RuleView) -> Iterator[Finding]:
         if run.alert is not None:
             for field in na_fields(view.rule.output, run.alert.output):
                 cases_by_field.setdefault(field, []).append(run.case)
-    for field, cases in cases_by_field.items():
-        names = ", ".join(f"`{c}`" for c in cases[:3]) + (
-            f" (+{len(cases) - 3} more)" if len(cases) > 3 else ""
-        )
-        yield _finding(
-            view,
-            "FTE009",
-            Severity.INFO,
-            f"output field `{field}` rendered `<NA>` on matching case(s) {names}",
-            "Set the field in the test event. If real events of this type cannot carry it, drop it from "
-            "the output.",
-        )
+    if not cases_by_field:
+        return
+    cases = list(dict.fromkeys(c for cs in cases_by_field.values() for c in cs))
+    names = ", ".join(f"`{c}`" for c in cases[:3]) + (f" (+{len(cases) - 3} more)" if len(cases) > 3 else "")
+    fields = ", ".join(f"`{f}`" for f in cases_by_field)
+    yield _finding(
+        view,
+        "FTE009",
+        Severity.INFO,
+        f"output field(s) {fields} rendered `<NA>` on matching case(s) {names}",
+        "Set the fields in the test events. If real events of this type cannot carry them, drop them "
+        "from the output.",
+    )
 
 
 LINTS: tuple[Lint, ...] = (
