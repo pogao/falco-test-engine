@@ -198,7 +198,7 @@ def _noise_line(report: RunReport) -> str:
 def _strength_line(report: RunReport) -> str:
     scored = [s.strength for s in report.sections if s.strength is not None]
     if not scored:
-        return "off" if report.mutation == "off" else "no rule has test cases to score"
+        return "no rule has test cases to score" if report.mutation == "on" else report.mutation
     killed, total = sum(x.killed for x in scored), sum(x.total for x in scored)
     survived = total - killed
     generated = sum(1 for x in scored for v in x.survivors if v.example is not None)

@@ -169,6 +169,8 @@ def test_load_errors_fail_the_run_and_are_listed(repo):
     assert "**FAIL**: rules failed to load." in md
     assert f"- `LOAD_ERR_COMPILE_CONDITION` {cfg.rules_files[1]}:10 rule `{PKG}`: unexpected token" in md
     assert "- Tests: not run: rules did not load." in md
+    assert "- Noise: not run: rules did not load." in md
+    assert "- Test strength: not run: rules did not load." in md
 
 
 def test_engine_fatal_fails_the_run(repo):

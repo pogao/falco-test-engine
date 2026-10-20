@@ -71,7 +71,7 @@ def run(
         jev=jev_line,
         other_rules=max(len(full.rules) - sum(1 for s in sections if s.loaded), 0),
         noise=noise_line,
-        mutation="on" if cfg.mutation.enabled else "off",
+        mutation=("on" if full.load.ok else "not run: rules did not load") if cfg.mutation.enabled else "off",
         **common,
     )
 
@@ -97,6 +97,8 @@ def _compare(
 def _noise(cfg, suites, sections, ordinary, full, base) -> tuple[str, tuple[RuleSection, ...]]:
     if not cfg.noise.enabled:
         return "off", sections
+    if not full.load.ok:
+        return "not run: rules did not load", sections
     usable = tuple(e for e in ordinary if isinstance(full.cases.get(e.id), EngineCaseRun))
     rejected = [r for e in ordinary if isinstance(r := full.cases.get(e.id), CaseError)]
     checked = []
