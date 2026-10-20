@@ -302,3 +302,7 @@ After a change to `ftest/corpus.py`, check that the corpus stays benign. This pr
 docker run --rm -v "$PWD/examples:/work" -v "$PWD/scripts:/scripts" -e PYTHONPATH=/opt/ftest \
 	--entrypoint python3 falco-test-engine:dev /scripts/noise_calibration.py -c falco-test.yaml
 ```
+
+## License
+
+Apache-2.0, the same license as Falco. See [LICENSE](LICENSE).
