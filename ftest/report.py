@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -142,6 +144,124 @@ def exit_code(report: RunReport) -> int:
     return 1 if failures(report) else 0
 
 
+@dataclass(frozen=True)
+class Part:
+    """One measured part of a rule's readiness: a whole percent, rounded down, and its inputs."""
+
+    percent: int
+    inputs: str
+
+
+@dataclass(frozen=True)
+class RuleReadiness:
+    """Each part of PARTS as (name, weight, Part), or None in place of a Part it could not measure.
+    Lint is always measured, so the measured weights never sum to zero."""
+
+    rule: str
+    parts: tuple[tuple[str, int, Part | None], ...]
+
+    @property
+    def score(self) -> int:
+        """sum(weight * percent) // sum(weight) over the measured parts, in integers, so the rendered
+        parts recompute it exactly and 100 needs every measured part at 100."""
+        measured = [(w, p.percent) for _, w, p in self.parts if p is not None]
+        return sum(w * pct for w, pct in measured) // sum(w for w, _ in measured)
+
+
+@dataclass(frozen=True)
+class Ready:
+    """At least one rule. The run is as ready as its weakest rule, the first in report order on a tie."""
+
+    rules: tuple[RuleReadiness, ...]
+
+    @property
+    def weakest(self) -> RuleReadiness:
+        return min(self.rules, key=lambda r: r.score)
+
+    @property
+    def score(self) -> int:
+        return self.weakest.score
+
+
+@dataclass(frozen=True)
+class NotReady:
+    """`reasons` is `failures(report)`: every reason the run fails is a hard gate."""
+
+    reasons: tuple[str, ...]
+
+
+def readiness(report: RunReport) -> Ready | NotReady | None:
+    """How far a finished run's evidence supports merging. Report-only: it never changes the exit
+    code. None when the run passes with no rule to score."""
+    if reasons := failures(report):
+        return NotReady(tuple(reasons))
+    rules = tuple(
+        RuleReadiness(s.name, tuple((name, weight, measure(s)) for name, weight, measure in PARTS))
+        for s in report.sections
+        if s.loaded
+    )
+    return Ready(rules) if rules else None
+
+
+def _strength_part(s: RuleSection) -> Part | None:
+    """killed / total. A rule with no test cases would catch no mutant, so it scores 0."""
+    if not s.outcomes:
+        return Part(0, "no tests")
+    if s.strength is None or not s.strength.total:
+        return None
+    killed, total = s.strength.killed, s.strength.total
+    return Part(100 * killed // total, f"{killed} of {total} mutants killed")
+
+
+def _noise_part(s: RuleSection) -> Part | None:
+    """1 - (fired - intended) / (budget * total), where `intended` counts the hits Jev read as intended.
+    A disabled rule never fires, so its 0 says nothing."""
+    n = s.noise
+    if n is None or not n.total or not s.enabled:
+        return None
+    intended = sum(1 for t in s.read if t.reading is Reading.INTENDED)
+    unintended = n.fired - intended
+    share = 1.0 if unintended == 0 else max(0.0, 1 - unintended / (n.budget * n.total))
+    shown = f", {intended} intended" if intended else ""
+    # The epsilon keeps float error such as 0.58 * 100 == 57.99999999999999 from losing a point.
+    return Part(
+        math.floor(share * 100 + 1e-9), f"{n.fired} of {n.total} fired{shown}; budget {percent(n.budget)}"
+    )
+
+
+def _jev_part(s: RuleSection) -> Part | None:
+    """Agreeing / judged over the test and generated events. An unsure call stays in the count."""
+    judged = [j for j in s.judgments if isinstance(j, Judgment)]
+    if not judged:
+        return None
+    agree = sum(1 for j in judged if j.stance in (Stance.AGREES, Stance.DISPUTES_EXPECT))
+    unsure = sum(1 for j in judged if j.stance is Stance.UNSURE)
+    shown = f", {unsure} unsure" if unsure else ""
+    return Part(100 * agree // len(judged), f"{agree} of {len(judged)} agree{shown}")
+
+
+# Findings whose evidence is another part: no tests (FTE011) and surviving mutants (FTE012) are
+# strength, and the noise budget (FTE013) is noise.
+_LINT_SKIPS = frozenset({"FTE011", "FTE012", "FTE013"})
+
+
+def _lint_part(s: RuleSection) -> Part:
+    """100 - 20 per warning - 100 per error, at least 0. Info findings cost nothing."""
+    counted = [f for f in s.findings if f.code not in _LINT_SKIPS]
+    errors = sum(1 for f in counted if f.severity is Severity.ERROR)
+    warnings = sum(1 for f in counted if f.severity is Severity.WARNING)
+    shown = ", ".join(_plural(n, word) for n, word in ((errors, "error"), (warnings, "warning")) if n)
+    return Part(max(0, 100 - 20 * warnings - 100 * errors), shown or "no errors or warnings")
+
+
+PARTS: tuple[tuple[str, int, Callable[[RuleSection], Part | None]], ...] = (
+    ("strength", 4, _strength_part),
+    ("noise", 3, _noise_part),
+    ("Jev events", 2, _jev_part),
+    ("lint", 1, _lint_part),
+)
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
@@ -247,8 +367,36 @@ def _severity_counts(findings) -> str:
     )
 
 
+def _readiness_text(ready: Ready | NotReady | None) -> str:
+    match ready:
+        case Ready():
+            return f"{ready.score}% (weakest: {ready.weakest.rule})"
+        case NotReady():
+            return "not ready (see the failures above)"
+        case None:
+            return "no rule to score"
+
+
+def _readiness_line(r: RuleReadiness) -> str:
+    """The score, each measured part with its inputs, the weights of those parts, and the parts not
+    measured: enough to recompute the score."""
+    measured = [(name, weight, part) for name, weight, part in r.parts if part is not None]
+    text = f"{r.score}%: " + ", ".join(
+        f"{name} {part.percent}% ({part.inputs})" for name, _, part in measured
+    )
+    text += ", weighted " + ", ".join(str(weight) for _, weight, _ in measured)
+    if missing := [name for name, _, part in r.parts if part is None]:
+        text += "; not measured: " + ", ".join(missing)
+    return text
+
+
+def _scores(ready: Ready | NotReady | None) -> dict[str, RuleReadiness]:
+    return {r.rule: r for r in ready.rules} if isinstance(ready, Ready) else {}
+
+
 def markdown(report: RunReport) -> str:
     verdict = failures(report)
+    ready = readiness(report)
     out = [
         "# Falco rule test report",
         "",
@@ -256,6 +404,7 @@ def markdown(report: RunReport) -> str:
         "",
         f"**{'FAIL' if verdict else 'PASS'}**" + (f": {'; '.join(verdict)}." if verdict else "."),
         "",
+        f"- Readiness: {_readiness_text(ready)}.",
         f"- Startup: {_startup_line(report.startup)}.",
         f"- Load: {_load_line(report)}.",
         f"- Tests: {_tests_line(report)}.",
@@ -279,15 +428,16 @@ def markdown(report: RunReport) -> str:
             out.append(f"- `{e.code}` {where}{item}: {e.message}")
             if e.snippet:
                 out += ["", "  ```", *(f"  {line}" for line in e.snippet.rstrip("\n").split("\n")), "  ```"]
+    scores = _scores(ready)
     for section in report.sections:
-        out += ["", *_section(section, report.jev_gate)]
+        out += ["", *_section(section, report.jev_gate, scores.get(section.name))]
     if report.findings:
         out += ["", "## Other findings", ""]
         out += [f"- {f.code} ({f.severity.value}): {f.message}" for f in report.findings]
     return "\n".join(out) + "\n"
 
 
-def _section(s: RuleSection, gate: bool) -> list[str]:
+def _section(s: RuleSection, gate: bool, ready: RuleReadiness | None) -> list[str]:
     status = "enabled" if s.enabled else "disabled"
     head = [f"## {s.name}", ""]
     if not s.loaded:
@@ -331,6 +481,8 @@ def _section(s: RuleSection, gate: bool) -> list[str]:
                 lines.append(f"  Suggestion: {f.suggestion}")
         if s.work:
             lines.append(f"- Work: {s.work.summary}.")
+    if ready is not None:
+        lines += ["", f"**Readiness.** {_readiness_line(ready)}."]
     return lines + _jev(s, gate)
 
 
@@ -464,12 +616,15 @@ def _tests(s: RuleSection) -> list[str]:
 
 def console(report: RunReport, written: list[Path]) -> str:
     verdict = failures(report)
+    ready = readiness(report)
+    scores = _scores(ready)
     lines = [f"ftest: {'FAIL' if verdict else 'PASS'}" + (f" ({'; '.join(verdict)})" if verdict else "")]
     lines.append(f"  startup  {_startup_line(report.startup).replace('**', '')}")
     lines.append(f"  load     {_load_line(report).replace('**', '')}")
     lines.append(f"  tests    {_tests_line(report)}")
     lines.append(f"  noise    {_noise_line(report).replace('**', '')}")
     lines.append(f"  strength {_strength_line(report).replace('**', '')}")
+    lines.append(f"  ready    {_readiness_text(ready)}")
     for s in report.sections:
         mark = "FAIL" if s.failed or not s.loaded or s.noisy or s.weak else "ok  "
         cases = f"{sum(o.passed for o in s.outcomes)}/{len(s.outcomes)} cases" if s.outcomes else "no tests"
@@ -479,7 +634,8 @@ def console(report: RunReport, written: list[Path]) -> str:
             noisy = f"; noise {s.noise.fired}/{s.noise.total} ({percent(s.noise.rate)}{jev})"
         strong = f"; strength {s.strength.killed}/{s.strength.total}" if s.strength else ""
         optimizing = s.needs_optimizing[0].lower() + s.needs_optimizing[1:]
-        lines.append(f"  {mark}     {s.name}: {cases}{noisy}{strong}; {optimizing}")
+        score = f"; ready {scores[s.name].score}%" if s.name in scores else ""
+        lines.append(f"  {mark}     {s.name}: {cases}{noisy}{strong}; {optimizing}{score}")
     lines.append(f"  jev      {report.jev}")
     for path in written:
         lines.append(f"  report   {path}")
@@ -576,6 +732,32 @@ def _triage_json(t: Triaged) -> dict:
     }
 
 
+def _readiness_json(ready: Ready | NotReady | None) -> dict:
+    match ready:
+        case Ready():
+            rules = [
+                {
+                    "rule": r.rule,
+                    "score": r.score,
+                    "parts": [
+                        {
+                            "name": name,
+                            "weight": weight,
+                            "percent": None if part is None else part.percent,
+                            "inputs": None if part is None else part.inputs,
+                        }
+                        for name, weight, part in r.parts
+                    ],
+                }
+                for r in ready.rules
+            ]
+            return {"status": "ready", "score": ready.score, "weakest": ready.weakest.rule, "rules": rules}
+        case NotReady():
+            return {"status": "not_ready", "reasons": list(ready.reasons)}
+        case None:
+            return {"status": "no_rules"}
+
+
 def to_json(report: RunReport) -> str:
     sections = []
     for s in report.sections:
@@ -598,6 +780,7 @@ def to_json(report: RunReport) -> str:
         "result": "fail" if failures(report) else "pass",
         "exit_code": exit_code(report),
         "failures": failures(report),
+        "readiness": _readiness_json(readiness(report)),
         "versions": asdict(report.versions) if report.versions else None,
         "startup": {"status": startup_status[type(report.startup)], **asdict(report.startup)},
         "load": asdict(report.load) if report.load else None,

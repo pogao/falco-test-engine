@@ -39,9 +39,10 @@ ftest: PASS
   tests    18 of 18 cases passed across 3 rules
   noise    3 rules checked on 315 ordinary events; none over budget
   strength 42 of 48 mutants killed across 3 rules; 6 survived, 6 with a generated case
-  ok       Cloud metadata access from container: 6/6 cases; noise 0/72 (0%); strength 16/17; needs optimizing: minor (2 info findings)
-  ok       Package manager run in container: 6/6 cases; noise 0/97 (0%); strength 10/12; needs optimizing: yes (FTE005)
-  ok       Terminal shell in container: 6/6 cases; noise 0/97 (0%); strength 16/19; needs optimizing: no
+  ready    89% (weakest: Package manager run in container)
+  ok       Cloud metadata access from container: 6/6 cases; noise 0/72 (0%); strength 16/17; needs optimizing: minor (2 info findings); ready 97%
+  ok       Package manager run in container: 6/6 cases; noise 0/97 (0%); strength 10/12; needs optimizing: yes (FTE005); ready 89%
+  ok       Terminal shell in container: 6/6 cases; noise 0/97 (0%); strength 16/19; needs optimizing: no; ready 92%
 ```
 
 The full report is in `examples/falco-test-report.md`.
@@ -57,6 +58,7 @@ Run `-c falco-test.broken.yaml` and the report names each bug through the cases 
 ```
 ftest: FAIL (7 test cases failed)
   tests    11 of 18 cases passed across 3 rules
+  ready    not ready (see the failures above)
   FAIL     Cloud metadata access from container: 5/6 cases; noise 0/72 (0%); strength 15/17; needs optimizing: yes (FTE006)
   FAIL     Package manager run in container: 1/6 cases; noise 0/315 (0%); strength 9/18; needs optimizing: yes (FTE001)
   FAIL     Terminal shell in container: 5/6 cases; noise 0/97 (0%); strength 16/19; needs optimizing: no
@@ -237,6 +239,27 @@ Jev judges only events whose suite states an `intent`. An intent that starts wit
 Each event is its own request, so no other event sits in Jev's state. A run sends one request per rule under test, one per judged event, and one per noise hit read and intent: 27 on the examples, where no rule fires on an ordinary event. ftest sends four at a time. A failed request costs only its own answer.
 
 The review is advisory. With `jev.gate: true`, the run fails when Jev disputes a rule's verdict on a test or generated event, when a priority is two or more levels off, or when one of those requests fails. Noise hits never fail it: the noise budget decides that. Set the key in `JEV_API_KEY` (or TypeSafe's own `TYPESAFE_API_KEY`). `JEV_BASE_URL` overrides `https://api.typesafe.ai`. With no key, the report says Jev was skipped.
+
+## Readiness
+
+The report scores how far a passing run's evidence supports merging, for each rule and for the run. A run that fails for any reason is not ready and gets no score. Readiness never changes the exit code.
+
+A rule's score combines four parts. Each part is a whole percent, rounded down.
+
+| Part | Weight | Formula | Not measured when |
+| --- | --- | --- | --- |
+| strength | 4 | `killed / total` mutants. A rule with no test cases scores 0. | Mutation is off, the rule is disabled, or it has no mutants. |
+| noise | 3 | `1 - (fired - intended) / (budget * total)`, where `intended` counts the hits Jev read as intended. | Noise is off, the rule is disabled, or no ordinary event has one of its event types. |
+| Jev events | 2 | `agreeing / judged` over the test and generated events. An unsure call counts as judged. | Jev judged no event of the rule. |
+| lint | 1 | `100 - 20 * warnings - 100 * errors`, at least 0. Info findings cost nothing. FTE011, FTE012, and FTE013 belong to strength and noise, so lint skips them. | Always measured. |
+
+The score is `sum(weight * percent) // sum(weight)` over the measured parts, in whole numbers, so a rule scores 100 only when every measured part is 100. The run scores its weakest rule. Each rule's section lists the parts with their inputs and weights:
+
+```
+**Readiness.** 84%: strength 83% (10 of 12 mutants killed), noise 79% (2 of 97 fired, 1 intended; budget 5%), Jev events 100% (9 of 9 agree), lint 80% (1 warning), weighted 4, 3, 2, 1.
+```
+
+Here `(4 * 83 + 3 * 79 + 2 * 100 + 1 * 80) // 10 = 84`. The JSON report has the same parts under `readiness`.
 
 ## Use it in CI
 

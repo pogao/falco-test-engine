@@ -196,6 +196,8 @@ def test_jev_reads_each_noise_hit_against_each_intent_and_never_gates(repo, monk
         assert fp.endswith(f"` ({suites[0]}: {no}; {suites[1]}: {no}).")
         intended = next(line for line in md.splitlines() if line.startswith(f"- intended: {MIGRATE_1}: `"))
         assert intended.endswith(f"` ({suites[0]}: {no}; {suites[1]}: {yes}).")
+        assert int(100 * (1 - (2 - 1) / (0.05 * EXECS))) == 79
+        assert f"noise 79% (2 of {EXECS} fired, 1 intended; budget 5%)" in md
         assert (
             f"{PKG}: 7/7 cases; noise 2/{EXECS} (2.1%; Jev: 1 false positive, 1 intended)"
             in capsys.readouterr().out
