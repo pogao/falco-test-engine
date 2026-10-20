@@ -11,5 +11,11 @@ WORKDIR /src/falco/build
 RUN cmake .. -DCMAKE_BUILD_TYPE=Release -DMINIMAL_BUILD=ON -DUSE_BUNDLED_DEPS=ON \
       -DBUILD_DRIVER=OFF -DBUILD_FALCO_MODERN_BPF=OFF -DBUILD_FALCO_UNIT_TESTS=OFF \
     && make -j"$(nproc)" falco_engine
+# Test assets for engine/test/run.sh: the stock rules and container plugin from the release tarball.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/falco \
+    && curl -fsSL "https://download.falco.org/packages/bin/$(uname -m)/falco-${FALCO_VERSION}-$(uname -m).tar.gz" \
+       | tar -xz -C /opt/falco --strip-components=1
 COPY engine /src/falco/userspace/falco-test-engine
 RUN cmake .. && make -j"$(nproc)" falco-test-engine
