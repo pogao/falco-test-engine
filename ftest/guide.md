@@ -121,7 +121,7 @@ Under a case that fired when it should not, or did not fire when it should, the 
 
 Fix the event or the rule from that list. Do not change `expect` to make the case pass.
 
-`falco-test-report.json` has these top-level keys: `result` (`pass` or `fail`), `exit_code`, `failures` (the reasons), `readiness`, `versions`, `startup`, `load`, `engine_error`, `base`, `changes`, `rules`, `findings`, `jev`, `noise`, `mutation`, and `other_rules`. Each entry of `rules` has `name`, `outcomes`, `coverage`, `findings`, `noise`, and `strength`. Each outcome has `name`, `expected`, `actual`, `passed`, `failures`, `warnings`, and `why`. `why` is a list of `{check, value, where, unset}`. `check` is the condition text, `value` is what it evaluated to, `where` says where it sits, and `unset` marks a check on a field the case does not set. To list the failed cases:
+`falco-test-report.json` has these top-level keys: `result` (`pass` or `fail`), `exit_code`, `failures` (the reasons), `readiness`, `versions`, `startup`, `load`, `engine_error`, `base`, `changes`, `rules`, `findings`, `jev`, `noise`, `mutation`, and `other_rules`. Each entry of `rules` has `name`, `outcomes`, `coverage`, `findings`, `noise`, and `strength`. Each outcome has `name`, `expected`, `actual`, `passed`, `failures`, `warnings`, and `why`. `why` is a list of `{check, value, where, unset}`. `check` is the check's condition text. `value` is `true` or `false` on this case. `where` is `in the rule condition`, `in macro <name>`, or `in exception <name>`. `unset` lists the fields the check reads that the case does not set. To list the failed cases:
 
 ```sh
 jq '.rules[].outcomes[] | select(.passed | not) | {name, failures, why}' falco-test-report.json
@@ -133,7 +133,7 @@ Decide whether the case or the rule is wrong from the suite's `intent`, never fr
 
 - `unknown field`: use the suggested name.
 - `expected ... to fire; it did not`: read `why`. If a deciding check reads a field the case does not set, set that field. If a set value makes the check false and the intent says the event must alert, fix the rule.
-- `expected ... not to fire; it fired`: read `why`. If the case leaves the excluded field unset, set it. If the case sets it and the rule still fires, the exception or `not` in the rule is wrong.
+- `expected ... not to fire; it fired`: read `why`. The checks listed `in exception` or under a `not` were false, so they did not stop the rule. If the case leaves the excluded field unset, set it. If the case sets it and the rule still fires, the exception or `not` in the rule is wrong.
 - `its condition matched but the rule is disabled`: the rule has `enabled: false` in the loaded rules files.
 - `expected rule set differs`: another rule also fired, or one did not. Narrow the event or the other rule, or list the extra rule if both should fire.
 - `output lacks`: the alert output did not contain the string. The report prints the actual output.
