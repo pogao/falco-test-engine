@@ -66,6 +66,22 @@ def test_run_passes_on_the_example_rules(repo, capsys):
     assert doc["result"] == "pass" and doc["exit_code"] == 0
     assert {r["name"] for r in doc["rules"]} == {SHELL, PKG, META}
 
+    # PKG: strength 10/12 floors to 83, noise 0 fired is 100, lint has one warning (FTE005), Jev is off.
+    pkg = (4 * (100 * 10 // 12) + 3 * 100 + 1 * (100 - 20)) // (4 + 3 + 1)
+    assert pkg == 89
+    assert f"- Readiness: {pkg}% (weakest: {PKG})." in md
+    assert (
+        f"**Readiness.** {pkg}%: strength 83% (10 of 12 mutants killed), noise 100% (0 of 97 fired; budget 5%), "
+        "lint 80% (1 warning), weighted 4, 3, 1; not measured: Jev events." in md
+    )
+    assert (doc["readiness"]["status"], doc["readiness"]["score"], doc["readiness"]["weakest"]) == (
+        "ready",
+        pkg,
+        PKG,
+    )
+    parts = next(r for r in doc["readiness"]["rules"] if r["rule"] == PKG)["parts"]
+    assert parts[2] == {"name": "Jev events", "weight": 2, "percent": None, "inputs": None}
+
     full_job, base_job, generated_job = received_jobs(state)
     assert generated_job["rules_files"] == full_job["rules_files"]
     assert all(c["id"].startswith(f"generated::{c['trace_rules'][0]}::") for c in generated_job["cases"])
@@ -75,7 +91,13 @@ def test_run_passes_on_the_example_rules(repo, capsys):
     pip = next(c for c in full_job["cases"] if c["id"].endswith("::pip from sh"))
     assert pip["trace_rules"] == [PKG]
     assert pip["fields"]["proc.pname"] == ["sh"] and pip["fields"]["proc.aname[2]"] == ["runc"]
-    assert capsys.readouterr().out.startswith("ftest: PASS")
+    out = capsys.readouterr().out
+    assert out.startswith("ftest: PASS")
+    assert f"  ready    {pkg}% (weakest: {PKG})" in out
+    assert (
+        f"  ok       {PKG}: 6/6 cases; noise 0/97 (0%); strength 10/12; needs optimizing: yes (FTE005); ready {pkg}%"
+        in out
+    )
 
 
 def test_run_fails_on_the_broken_rules_and_says_why(repo, capsys):
@@ -86,9 +108,30 @@ def test_run_fails_on_the_broken_rules_and_says_why(repo, capsys):
     assert f"- FAIL `yum on the host is out of scope`: expected `{PKG}` not to fire; it fired." in md
     assert f"- FAIL `pip from sh`: expected `{PKG}` to fire; it did not." in md
     assert f"- FAIL `other acme images still alert`: expected `{SHELL}` to fire; it did not." in md
+    assert "- Readiness: not ready (see the failures above)." in md
+    assert "**Readiness.**" not in md
+    doc = json.loads((repo / "falco-test-report.json").read_text())
+    assert doc["readiness"] == {"status": "not_ready", "reasons": ["6 test cases failed"]}
     out = capsys.readouterr().out
     assert out.startswith("ftest: FAIL (6 test cases failed)")
+    assert "  ready    not ready (see the failures above)" in out
     assert f"  FAIL     {PKG}: 1/6 cases" in out
+    assert "; ready " not in out
+
+
+def test_readiness_scores_only_the_parts_that_were_measured(repo):
+    engine(repo, World.full(), World.stock())
+    cfg = yaml.safe_load((repo / "falco-test.yaml").read_text())
+    cfg["noise"] = {"enabled": False}
+    cfg["mutation"] = {"enabled": False}
+    (repo / "falco-test.yaml").write_text(yaml.safe_dump(cfg))
+    assert main(["run"]) == 0
+    md = report(repo)
+    assert (
+        "**Readiness.** 80%: lint 80% (1 warning), weighted 1; not measured: strength, noise, Jev events."
+        in md
+    )
+    assert f"- Readiness: 80% (weakest: {PKG})." in md
 
 
 def test_step_summary_gets_the_markdown(repo, monkeypatch):
@@ -258,6 +301,14 @@ def test_jev_judges_each_event_against_its_suite_intent(repo, monkeypatch):
         assert (
             "- Jev judged 9 events against their suite's intent: it agrees with the rule on 6, is unsure on 3."
             in md
+        )
+        # SHELL: strength 16/19 floors to 84, Jev agrees on 6 of 9 (the 3 unsure count against it).
+        shell = (4 * (100 * 16 // 19) + 3 * 100 + 2 * (100 * 6 // 9) + 1 * 100) // 10
+        assert shell == 86
+        assert (
+            f"**Readiness.** {shell}%: strength 84% (16 of 19 mutants killed), noise 100% (0 of 97 fired; "
+            "budget 5%), Jev events 66% (6 of 9 agree, 3 unsure), lint 100% (no errors or warnings), "
+            "weighted 4, 3, 2, 1." in md
         )
 
         cfg = yaml.safe_load((repo / "falco-test.yaml").read_text())

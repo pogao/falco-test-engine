@@ -367,8 +367,36 @@ def _severity_counts(findings) -> str:
     )
 
 
+def _readiness_text(ready: Ready | NotReady | None) -> str:
+    match ready:
+        case Ready():
+            return f"{ready.score}% (weakest: {ready.weakest.rule})"
+        case NotReady():
+            return "not ready (see the failures above)"
+        case None:
+            return "no rule to score"
+
+
+def _readiness_line(r: RuleReadiness) -> str:
+    """The score, each measured part with its inputs, the weights of those parts, and the parts not
+    measured: enough to recompute the score."""
+    measured = [(name, weight, part) for name, weight, part in r.parts if part is not None]
+    text = f"{r.score}%: " + ", ".join(
+        f"{name} {part.percent}% ({part.inputs})" for name, _, part in measured
+    )
+    text += ", weighted " + ", ".join(str(weight) for _, weight, _ in measured)
+    if missing := [name for name, _, part in r.parts if part is None]:
+        text += "; not measured: " + ", ".join(missing)
+    return text
+
+
+def _scores(ready: Ready | NotReady | None) -> dict[str, RuleReadiness]:
+    return {r.rule: r for r in ready.rules} if isinstance(ready, Ready) else {}
+
+
 def markdown(report: RunReport) -> str:
     verdict = failures(report)
+    ready = readiness(report)
     out = [
         "# Falco rule test report",
         "",
@@ -376,6 +404,7 @@ def markdown(report: RunReport) -> str:
         "",
         f"**{'FAIL' if verdict else 'PASS'}**" + (f": {'; '.join(verdict)}." if verdict else "."),
         "",
+        f"- Readiness: {_readiness_text(ready)}.",
         f"- Startup: {_startup_line(report.startup)}.",
         f"- Load: {_load_line(report)}.",
         f"- Tests: {_tests_line(report)}.",
@@ -399,15 +428,16 @@ def markdown(report: RunReport) -> str:
             out.append(f"- `{e.code}` {where}{item}: {e.message}")
             if e.snippet:
                 out += ["", "  ```", *(f"  {line}" for line in e.snippet.rstrip("\n").split("\n")), "  ```"]
+    scores = _scores(ready)
     for section in report.sections:
-        out += ["", *_section(section, report.jev_gate)]
+        out += ["", *_section(section, report.jev_gate, scores.get(section.name))]
     if report.findings:
         out += ["", "## Other findings", ""]
         out += [f"- {f.code} ({f.severity.value}): {f.message}" for f in report.findings]
     return "\n".join(out) + "\n"
 
 
-def _section(s: RuleSection, gate: bool) -> list[str]:
+def _section(s: RuleSection, gate: bool, ready: RuleReadiness | None) -> list[str]:
     status = "enabled" if s.enabled else "disabled"
     head = [f"## {s.name}", ""]
     if not s.loaded:
@@ -451,6 +481,8 @@ def _section(s: RuleSection, gate: bool) -> list[str]:
                 lines.append(f"  Suggestion: {f.suggestion}")
         if s.work:
             lines.append(f"- Work: {s.work.summary}.")
+    if ready is not None:
+        lines += ["", f"**Readiness.** {_readiness_line(ready)}."]
     return lines + _jev(s, gate)
 
 
@@ -584,12 +616,15 @@ def _tests(s: RuleSection) -> list[str]:
 
 def console(report: RunReport, written: list[Path]) -> str:
     verdict = failures(report)
+    ready = readiness(report)
+    scores = _scores(ready)
     lines = [f"ftest: {'FAIL' if verdict else 'PASS'}" + (f" ({'; '.join(verdict)})" if verdict else "")]
     lines.append(f"  startup  {_startup_line(report.startup).replace('**', '')}")
     lines.append(f"  load     {_load_line(report).replace('**', '')}")
     lines.append(f"  tests    {_tests_line(report)}")
     lines.append(f"  noise    {_noise_line(report).replace('**', '')}")
     lines.append(f"  strength {_strength_line(report).replace('**', '')}")
+    lines.append(f"  ready    {_readiness_text(ready)}")
     for s in report.sections:
         mark = "FAIL" if s.failed or not s.loaded or s.noisy or s.weak else "ok  "
         cases = f"{sum(o.passed for o in s.outcomes)}/{len(s.outcomes)} cases" if s.outcomes else "no tests"
@@ -599,7 +634,8 @@ def console(report: RunReport, written: list[Path]) -> str:
             noisy = f"; noise {s.noise.fired}/{s.noise.total} ({percent(s.noise.rate)}{jev})"
         strong = f"; strength {s.strength.killed}/{s.strength.total}" if s.strength else ""
         optimizing = s.needs_optimizing[0].lower() + s.needs_optimizing[1:]
-        lines.append(f"  {mark}     {s.name}: {cases}{noisy}{strong}; {optimizing}")
+        score = f"; ready {scores[s.name].score}%" if s.name in scores else ""
+        lines.append(f"  {mark}     {s.name}: {cases}{noisy}{strong}; {optimizing}{score}")
     lines.append(f"  jev      {report.jev}")
     for path in written:
         lines.append(f"  report   {path}")
@@ -696,6 +732,32 @@ def _triage_json(t: Triaged) -> dict:
     }
 
 
+def _readiness_json(ready: Ready | NotReady | None) -> dict:
+    match ready:
+        case Ready():
+            rules = [
+                {
+                    "rule": r.rule,
+                    "score": r.score,
+                    "parts": [
+                        {
+                            "name": name,
+                            "weight": weight,
+                            "percent": None if part is None else part.percent,
+                            "inputs": None if part is None else part.inputs,
+                        }
+                        for name, weight, part in r.parts
+                    ],
+                }
+                for r in ready.rules
+            ]
+            return {"status": "ready", "score": ready.score, "weakest": ready.weakest.rule, "rules": rules}
+        case NotReady():
+            return {"status": "not_ready", "reasons": list(ready.reasons)}
+        case None:
+            return {"status": "no_rules"}
+
+
 def to_json(report: RunReport) -> str:
     sections = []
     for s in report.sections:
@@ -718,6 +780,7 @@ def to_json(report: RunReport) -> str:
         "result": "fail" if failures(report) else "pass",
         "exit_code": exit_code(report),
         "failures": failures(report),
+        "readiness": _readiness_json(readiness(report)),
         "versions": asdict(report.versions) if report.versions else None,
         "startup": {"status": startup_status[type(report.startup)], **asdict(report.startup)},
         "load": asdict(report.load) if report.load else None,
