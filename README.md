@@ -226,11 +226,17 @@ Jev judges only events whose suite states an `intent`. An intent that starts wit
 
 `ftest generate` writes Jev's call as a comment above each case it writes, and prints each case where Jev disputes the rule. Pass `--no-jev` to skip it.
 
+**Is this noise hit a false positive?** For each ordinary event a rule under test fires on, ftest asks the same two questions with the event as the corpus writes it, once for each distinct intent among the rule's suites. A hit is intended when any intent calls for the alert, a false positive when every intent rules it out, and unsure otherwise. Jev reads at most eight hits per rule: the first hit of each event type, then hits spread evenly over the rest. The noise section counts the readings and lists each hit Jev read:
+
+```
+**Noise.** Fired on 2 of the 97 ordinary events of its event types (2.1%); budget 5%. Jev read 2 hits: 1 false positive, 1 intended.
+```
+
 **Which priority fits the rule?** Jev judges this from the rule's `desc` and what it does, without seeing the declared priority. ftest then compares the answer with the declared one.
 
-Each event is its own request, so no other event sits in Jev's state. A run sends one request per rule under test and one per judged event: 27 on the examples. ftest sends four at a time. A failed request costs only its own answer.
+Each event is its own request, so no other event sits in Jev's state. A run sends one request per rule under test, one per judged event, and one per noise hit read and intent: 27 on the examples, where no rule fires on an ordinary event. ftest sends four at a time. A failed request costs only its own answer.
 
-The review is advisory. With `jev.gate: true`, the run fails when Jev disputes a rule's verdict on any event, when a priority is two or more levels off, or when a request fails. Set the key in `JEV_API_KEY` (or TypeSafe's own `TYPESAFE_API_KEY`). `JEV_BASE_URL` overrides `https://api.typesafe.ai`. With no key, the report says Jev was skipped.
+The review is advisory. With `jev.gate: true`, the run fails when Jev disputes a rule's verdict on a test or generated event, when a priority is two or more levels off, or when one of those requests fails. Noise hits never fail it: the noise budget decides that. Set the key in `JEV_API_KEY` (or TypeSafe's own `TYPESAFE_API_KEY`). `JEV_BASE_URL` overrides `https://api.typesafe.ai`. With no key, the report says Jev was skipped.
 
 ## Use it in CI
 
