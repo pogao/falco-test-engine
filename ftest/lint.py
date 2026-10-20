@@ -488,8 +488,9 @@ def _repeats(view: RuleView) -> Iterator[Finding]:
                 )
 
 
-def _contradiction(terms: list[Node]) -> tuple[Check, Check] | None:
-    allowed: dict[str, tuple[set[str], Check]] = {}
+def _contradiction(terms: list[Node]) -> list[Check] | None:
+    """The equality and `in` terms on one field whose allowed values have no common member."""
+    allowed: dict[str, tuple[set[str], list[Check]]] = {}
     for term in terms:
         if not (
             isinstance(term, Check)
@@ -503,12 +504,18 @@ def _contradiction(terms: list[Node]) -> tuple[Check, Check] | None:
         values = set(_values(term))
         if key in allowed:
             narrowed = allowed[key][0] & values
+            involved = [*allowed[key][1], term]
             if not narrowed:
-                return allowed[key][1], term
-            allowed[key] = (narrowed, allowed[key][1])
+                return involved
+            allowed[key] = (narrowed, involved)
         else:
-            allowed[key] = (values, term)
+            allowed[key] = (values, [term])
     return None
+
+
+def _all_of(shape: Shape, terms: list[Check]) -> str:
+    shown = [f"`{shape.display(t)}`" for t in terms]
+    return (" and " if len(shown) == 2 else ", ").join(shown)
 
 
 def _and_chains(node: Node, under_and: bool = False) -> Iterator[And]:
@@ -530,8 +537,8 @@ def _never_fires(view: RuleView) -> Iterator[Finding]:
     why = None
     if not rule.evttypes:
         why = "no event type can satisfy its condition"
-    elif pair := _contradiction(conjuncts(shape.body)):
-        why = f"`{shape.display(pair[0])}` and `{shape.display(pair[1])}` can never both be true"
+    elif terms := _contradiction(conjuncts(shape.body)):
+        why = f"{_all_of(shape, terms)} can never {'both' if len(terms) == 2 else 'all'} be true"
     if why:
         if "never_true" in rule.macros:
             yield _finding(
@@ -553,13 +560,13 @@ def _never_fires(view: RuleView) -> Iterator[Finding]:
     for chain in _and_chains(shape.body):
         if chain is root:
             continue
-        if pair := _contradiction(conjuncts(chain)):
+        if terms := _contradiction(conjuncts(chain)):
             yield _finding(
                 view,
                 "FTE008",
                 Severity.WARNING,
                 f"{shape.where(chain)}: `{shape.display(chain)}` can never be true "
-                f"(`{shape.display(pair[0])}` and `{shape.display(pair[1])}` conflict)",
+                f"({_all_of(shape, terms)} conflict)",
             )
 
 
