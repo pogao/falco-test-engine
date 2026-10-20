@@ -1,10 +1,13 @@
 """End to end: `ftest` against a fake `falco-test-engine` on PATH that evaluates a sample world."""
 
+import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -14,10 +17,12 @@ from samples import META, PKG, SHELL, World, broken_world
 from test_diff_and_startup import fake_falco
 from test_jev import Stub, answering
 
+import ftest
 from ftest.cli import main
-from ftest.config import load_config
+from ftest.config import ConfigError, load_config, parse_config
+from ftest.fixtures import derive
 from ftest.strength import verdicts
-from ftest.suite import load_suites
+from ftest.suite import SuiteError, load_suites, parse_suite
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -469,3 +474,59 @@ def test_python_dash_m_entry_point(repo):
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.startswith("ftest: PASS")
+
+
+@pytest.fixture
+def guide(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert main(["guide"]) == 0, "`ftest guide` must work with no falco-test.yaml"
+    return capsys.readouterr().out
+
+
+def allowed_keys(error: type[Exception], parse, raw) -> list[str]:
+    with pytest.raises(error) as e:
+        parse(raw)
+    return ast.literal_eval(str(e.value).split("allowed: ", 1)[1])
+
+
+def test_help_points_to_the_guide(capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--help"])
+    assert e.value.code == 0
+    assert "ftest guide" in capsys.readouterr().out
+
+
+def test_guide_names_every_subcommand(guide, capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    commands = re.search(r"\{([\w,]+)\}", capsys.readouterr().out).group(1).split(",")
+    assert "guide" in commands
+    assert [c for c in commands if f"ftest {c}" not in guide] == []
+
+
+def test_guide_names_every_finding_code(guide):
+    sources = Path(ftest.__file__).parent.glob("*.py")
+    codes = {code for p in sources for code in re.findall(r"FTE\d{3}", p.read_text())}
+    assert len(codes) > 10
+    assert sorted(c for c in codes if c not in guide) == []
+
+
+def test_guide_names_every_suite_and_config_key(guide):
+    suite = partial(parse_suite, path=Path("s.yaml"), display="s.yaml")
+    config = partial(parse_config, path=Path("/r/falco-test.yaml"))
+    keys = allowed_keys(SuiteError, suite, {"unknown_key": 1})
+    keys += allowed_keys(SuiteError, suite, {"rule": "r", "cases": [{"unknown_key": 1}]})
+    keys += allowed_keys(ConfigError, config, {"unknown_key": 1})
+    assert {"max_fire_rate", "output_contains", "rules_files"} <= set(keys)
+    assert [k for k in keys if f"`{k}" not in guide] == []
+
+
+def test_guide_names_every_derived_field(guide):
+    own = ("proc.name", "proc.pid", "proc.exe", "proc.exepath", "proc.cmdline")
+    ancestors = ("proc.aname", "proc.apid", "proc.aexe", "proc.aexepath", "proc.acmdline")
+    probe = {f: ("bash",) for f in own} | {f: ("sh", "runc") for f in ancestors}
+    probe |= {"fd.cip": ("10.0.0.1",), "fd.sip": ("169.254.169.254",), "fd.cport": ("41000",)}
+    probe |= {"fd.sport": ("80",), "fd.cproto": ("tcp",), "fd.sproto": ("tcp",), "fd.name": ("/etc/passwd",)}
+    derived = {re.sub(r"\[\d+\]$", "[N]", f) for f in derive(probe) if f not in probe}
+    assert {"proc.pname", "proc.aname[N]", "fd.net", "fd.filename"} <= derived
+    assert sorted(f for f in derived if f"`{f}`" not in guide) == []

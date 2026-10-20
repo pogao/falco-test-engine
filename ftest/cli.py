@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import difflib
+import importlib.resources
 import json
 import os
 import re
@@ -31,7 +32,11 @@ USAGE_ERROR = 2
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ftest", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="ftest",
+        description=__doc__,
+        epilog="Run `ftest guide` for the suite format, how event fields work, and the workflow.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     run_cmd = commands.add_parser("run", help="run every suite and write the report")
@@ -50,8 +55,12 @@ def main(argv: list[str] | None = None) -> int:
     generate_cmd.add_argument("--no-jev", action="store_true", help="skip Jev's call on each generated case")
     for cmd in (run_cmd, describe_cmd, scaffold_cmd, generate_cmd):
         cmd.add_argument("-c", "--config", type=Path, default=Path("falco-test.yaml"))
+    commands.add_parser("guide", help="print the guide to writing, running, and fixing suites")
 
     args = parser.parse_args(argv)
+    if args.command == "guide":
+        print(importlib.resources.files("ftest").joinpath("guide.md").read_text(), end="")
+        return 0
     try:
         cfg = load_config(args.config)
         match args.command:
