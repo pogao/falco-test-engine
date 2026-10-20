@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import posixpath
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -829,9 +830,9 @@ def load_corpus(paths: Iterable[Path], root: Path) -> tuple[Case, ...]:
 
 
 def values_by_field(events: Iterable[Case]) -> dict[str, tuple[str, ...]]:
-    """Distinct values of each field, in corpus order: realistic replacements for generated cases."""
-    seen: dict[str, dict[str, None]] = {}
+    """Distinct values of each field, most common first: realistic replacements for generated cases."""
+    counts: dict[str, Counter[str]] = {}
     for event in events:
         for key, values in event.event.items():
-            seen.setdefault(key, {}).update(dict.fromkeys(values))
-    return {key: tuple(values) for key, values in seen.items()}
+            counts.setdefault(key, Counter()).update(values)
+    return {key: tuple(v for v, _ in c.most_common()) for key, c in counts.items()}

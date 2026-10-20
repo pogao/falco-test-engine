@@ -7,27 +7,66 @@ engine's leaf values for that case, so scoring needs no extra engine run.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+
+import yaml
 
 from ftest.cond import evaluate
 from ftest.engine import Rule, Trace
 from ftest.findings import Finding, Severity
 from ftest.mutate import MAX_MUTANTS, Mutant
 from ftest.noise import percent
-from ftest.suite import Case, ExpectExactRules, ExpectFires
+from ftest.suite import Case, ExpectExactRules, ExpectFires, Suite
 
 
 @dataclass(frozen=True)
 class Run:
+    suite: Suite
     case: Case
     trace: Trace
     fired: bool
 
 
 @dataclass(frozen=True)
+class Generated:
+    """A case on which the current rule and a mutant disagree, as the engine evaluated it.
+
+    `expect` is what the current rule does there, not what anyone said it should do."""
+
+    name: str
+    extends: str
+    suite: Suite
+    given: Mapping[str, tuple[str, ...]]
+    changes: Mapping[str, tuple[str, tuple[str, ...] | None]]
+    expect: bool
+
+    @property
+    def verdict(self) -> str:
+        return "match" if self.expect else "no_match"
+
+    @property
+    def changed(self) -> str:
+        return "; ".join(
+            f"`{k}` from `{before}` to `{', '.join(after)}`" if after else f"unsets `{k}` (was `{before}`)"
+            for k, (before, after) in self.changes.items()
+        )
+
+    def case(self, with_defaults: bool = False) -> dict:
+        """The suite case. With `with_defaults`, the event also holds its source suite's defaults."""
+        fields = {**self.suite.defaults, **self.given} if with_defaults else self.given
+        event = {k: v[0] if len(v) == 1 else list(v) for k, v in fields.items()}
+        return {"name": self.name, "expect": self.verdict, "event": event}
+
+    def yaml(self, with_defaults: bool = False) -> str:
+        doc = [self.case(with_defaults)]
+        return yaml.safe_dump(doc, sort_keys=False, default_flow_style=None, width=10_000)
+
+
+@dataclass(frozen=True)
 class Survivor:
     mutant: Mutant
+    example: Generated | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +76,7 @@ class Strength:
     generated: int
     survivors: tuple[Survivor, ...]
     min_score: float | None
+    unchecked: str | None = None
 
     @property
     def score(self) -> float:

@@ -43,3 +43,75 @@ def test_mutation_can_be_turned_off(repo):  # noqa: F811
     md = report(repo)
     assert "- Test strength: off." in md
     assert "FTE012" not in md and f"## {META}" in md
+
+
+HOST_CASE = "yum on the host is out of scope"
+
+
+def weaken(repo):  # noqa: F811
+    path = repo / "tests" / "package_manager_in_container.yaml"
+    suite = yaml.safe_load(path.read_text())
+    suite["cases"] = [c for c in suite["cases"] if c["name"] != HOST_CASE]
+    path.write_text(yaml.safe_dump(suite, sort_keys=False))
+
+
+def test_a_survivor_comes_with_a_case_the_engine_checked(repo):  # noqa: F811
+    engine(repo, World.full(), World.stock())
+    weaken(repo)
+    assert main(["run"]) == 0
+    md = report(repo)
+    assert "- FTE012 (warning): your tests would not catch dropping macro `container`." in md
+    assert (
+        "  The current rule says no_match here; confirm that is what you want, then add it to your suite. "
+        "This case extends `apt-get from bash in nginx` in tests/package_manager_in_container.yaml and "
+        "changes `container.id` from `9f2c51b0a1d4` to `host`." in md
+    )
+    assert "  - name: apt-get from bash in nginx, with container.id=host\n    expect: no_match\n" in md
+
+
+def test_generate_writes_a_suite_that_kills_the_survivors(repo, capsys):  # noqa: F811
+    engine(repo, World.full(), World.stock())
+    weaken(repo)
+    assert main(["generate", PKG]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith(f"{PKG}: 9 of 12 mutants killed (75%)")
+    path = repo / "tests" / "package_manager_run_in_container_generated.yaml"
+    text = path.read_text()
+    assert "not a verified intent" in text and "confirm it is what you want" in text
+    suite = yaml.safe_load(text)
+    assert suite["rule"] == PKG and suite["defaults"]["container.id"] == "9f2c51b0a1d4"
+    host = next(c for c in suite["cases"] if c["event"].get("container.id") == "host")
+    assert host["expect"] == "no_match" and host["event"]["proc.name"] == "apt-get"
+
+    assert main(["run"]) == 0
+    assert "**Test strength.** 12 of 12 mutants killed (100%)." in report(repo)
+    assert main(["generate", PKG, "-o", str(path)]) == 0
+    assert path.read_text() == text
+    assert "12 of 12 mutants killed" in capsys.readouterr().out
+
+
+def test_generate_refuses_to_overwrite_and_needs_cases(repo, capsys):  # noqa: F811
+    engine(repo, World.full(), World.stock())
+    weaken(repo)
+    assert main(["generate", PKG, "-o", "tests/package_manager_in_container.yaml"]) == 1
+    assert "exists" in capsys.readouterr().err
+    (repo / "tests" / "package_manager_in_container.yaml").unlink()
+    assert main(["generate", PKG]) == 1
+    assert "write a suite first" in capsys.readouterr().err
+
+
+def test_a_failed_check_of_generated_events_is_reported_not_hidden(repo):  # noqa: F811
+    engine(repo, World.full(), World.stock())
+    weaken(repo)
+    fake = repo.parent / "bin" / "falco-test-engine"
+    shebang, rest = fake.read_text().split("\n", 1)
+    crash = (
+        "import json, pathlib, sys\n"
+        "job = json.loads(pathlib.Path(sys.argv[sys.argv.index('--job') + 1]).read_text())\n"
+        "if any(c['id'].startswith('generated::') for c in job['cases']):\n"
+        "    print(json.dumps({'fatal': 'verification crashed'}))\n"
+        "    sys.exit(2)\n"
+    )
+    fake.write_text(f"{shebang}\n{crash}{rest}")
+    assert main(["run"]) == 0
+    assert "  Generated events were not checked: engine failed: verification crashed." in report(repo)

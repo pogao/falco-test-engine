@@ -104,7 +104,7 @@ def score(world, suites, rule_name, changed=(), drop_case=None):
     res = engine_result(world, suites)
     rule = res.rules[rule_name]
     runs = [
-        Run(c, res.cases[c.id].traces[rule_name], res.cases[c.id].alert_for(rule_name) is not None)
+        Run(s, c, res.cases[c.id].traces[rule_name], res.cases[c.id].alert_for(rule_name) is not None)
         for s in suites
         if s.rule == rule_name
         for c in s.cases
@@ -116,8 +116,9 @@ def score(world, suites, rule_name, changed=(), drop_case=None):
 def score_only(world, suites, rule_name, keep):
     res = engine_result(world, suites)
     rule = res.rules[rule_name]
-    case = next(c for s in suites if s.rule == rule_name for c in s.cases if c.name == keep)
-    run = Run(case, res.cases[case.id].traces[rule_name], res.cases[case.id].alert_for(rule_name) is not None)
+    suite, case = next((s, c) for s in suites if s.rule == rule_name for c in s.cases if c.name == keep)
+    fired = res.cases[case.id].alert_for(rule_name) is not None
+    run = Run(suite, case, res.cases[case.id].traces[rule_name], fired)
     return measure(rule, mutants(rule, shape_of(rule), ()), [run], None)
 
 

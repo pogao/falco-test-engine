@@ -7,10 +7,10 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from ftest import mutate, noise, strength
+from ftest import mutate, noise, strength, synth
 from ftest.cond import render
 from ftest.config import Config, JevMode
-from ftest.corpus import builtin, load_corpus
+from ftest.corpus import builtin, load_corpus, values_by_field
 from ftest.coverage import consistency, coverage
 from ftest.diff import RuleChange, changed_macros, diff_rules, untested
 from ftest.engine import CaseError, EngineError, EngineResult, JobCase, Rule, build_job, run_engine
@@ -58,6 +58,7 @@ def run(
     if cfg.mutation.enabled:
         changed = changed_macros(base.macros, full.macros) if base is not None else frozenset()
         sections = _strength(cfg, suites, sections, full, changed)
+        sections = _generate(cfg, suites, sections, full)
     jev_line, sections = _jev(cfg, use_jev, env, suites, sections, full)
     return RunReport(
         versions=full.versions,
@@ -132,12 +133,58 @@ def _strength(cfg, suites, sections, full, changed) -> tuple[RuleSection, ...]:
     return tuple(scored)
 
 
+def _generate(cfg, suites, sections, full) -> tuple[RuleSection, ...]:
+    """Search for an event that tells each survivor from its rule, then let the engine judge."""
+    pool = values_by_field(builtin())
+    pending: dict[str, tuple[str, int, synth.Candidate]] = {}
+    cases = []
+    for section in sections:
+        if section.strength is None:
+            continue
+        rule, runs = full.rules[section.name], _runs(full, suites, section.name)
+        for si, survivor in enumerate(section.strength.survivors):
+            for ci, candidate in enumerate(synth.search(rule, survivor.mutant, runs, pool)):
+                case = synth.job_case(candidate, section.name, f"{si}::{ci}")
+                pending[case.id] = (section.name, si, candidate)
+                cases.append(JobCase(case, section.name))
+    if not cases:
+        return sections
+    try:
+        checked = run_engine(cfg.engine_binary, build_job(cfg.rules_files, cfg.plugins, cases))
+    except EngineError as e:
+        return tuple(
+            dataclasses.replace(s, strength=dataclasses.replace(s.strength, unchecked=str(e)))
+            if s.strength is not None
+            else s
+            for s in sections
+        )
+    by_name = {s.name: s for s in sections}
+    examples: dict[tuple[str, int], strength.Generated] = {}
+    for case_id, (name, si, candidate) in pending.items():
+        mutant = by_name[name].strength.survivors[si].mutant
+        if (name, si) not in examples:
+            found = synth.verified(candidate, full.rules[name], mutant, checked.cases.get(case_id))
+            if found is not None:
+                examples[(name, si)] = found
+    return tuple(_with_examples(s, examples) for s in sections)
+
+
+def _with_examples(section: RuleSection, examples) -> RuleSection:
+    if section.strength is None:
+        return section
+    survivors = tuple(
+        dataclasses.replace(s, example=examples.get((section.name, i)))
+        for i, s in enumerate(section.strength.survivors)
+    )
+    return dataclasses.replace(section, strength=dataclasses.replace(section.strength, survivors=survivors))
+
+
 def _runs(full: EngineResult, suites: tuple[Suite, ...], name: str) -> list[strength.Run]:
     runs = []
-    for case in (c for s in suites if s.rule == name for c in s.cases):
+    for suite, case in ((s, c) for s in suites if s.rule == name for c in s.cases):
         result = full.cases.get(case.id)
         if isinstance(result, EngineCaseRun) and name in result.traces:
-            runs.append(strength.Run(case, result.traces[name], result.alert_for(name) is not None))
+            runs.append(strength.Run(suite, case, result.traces[name], result.alert_for(name) is not None))
     return runs
 
 

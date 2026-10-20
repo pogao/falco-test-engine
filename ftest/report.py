@@ -16,7 +16,7 @@ from ftest.lint import Work
 from ftest.noise import Noise, percent
 from ftest.outcomes import CaseOutcome
 from ftest.startup import StartupFailed, StartupPassed, StartupResult, StartupSkipped
-from ftest.strength import Strength
+from ftest.strength import Generated, Strength
 
 PERFORMANCE_CODES = frozenset({"FTE001", "FTE002", "FTE003", "FTE004", "FTE005", "FTE006", "FTE007"})
 
@@ -200,8 +200,9 @@ def _strength_line(report: RunReport) -> str:
         return "off" if report.mutation == "off" else "no rule has test cases to score"
     killed, total = sum(x.killed for x in scored), sum(x.total for x in scored)
     survived = total - killed
+    generated = sum(1 for x in scored for v in x.survivors if v.example is not None)
     text = f"{killed} of {total} mutants killed across {_plural(len(scored), 'rule')}"
-    text += f"; {survived} survived" if survived else "; none survived"
+    text += f"; {survived} survived, {generated} with a generated case" if survived else "; none survived"
     if weak := sum(1 for s in report.sections if s.weak):
         text += f"; **{_plural(weak, 'rule')} below the minimum**"
     return text
@@ -319,10 +320,26 @@ def _strength(s: RuleSection) -> list[str]:
         return []
     summary = s.strength.summary[0].upper() + s.strength.summary[1:]
     lines = ["", f"**Test strength.** {'FAIL. ' if s.weak else ''}{summary}."]
-    for f in s.findings:
-        if f.code == "FTE012":
-            lines.append(f"- {f.code} ({f.severity.value}): {f.message}.")
+    for survivor in s.strength.survivors:
+        lines.append(f"- FTE012 (warning): your tests would not catch {survivor.mutant.description}.")
+        lines += _generated(survivor.example, s.strength.unchecked)
     return lines
+
+
+def _generated(g: Generated | None, unchecked: str | None) -> list[str]:
+    if unchecked is not None:
+        return [f"  Generated events were not checked: {unchecked}."]
+    if g is None:
+        return ["  No distinguishing event found; this mutant may mean the same as the rule."]
+    return [
+        f"  The current rule says {g.verdict} here; confirm that is what you want, then add it to your "
+        f"suite. This case extends `{g.extends}` in {g.suite.display} and changes {g.changed}. "
+        "The engine evaluated it: the rule and this mutant disagree.",
+        "",
+        "  ```yaml",
+        *(f"  {line}" for line in g.yaml().splitlines()),
+        "  ```",
+    ]
 
 
 def _noise(s: RuleSection) -> list[str]:
