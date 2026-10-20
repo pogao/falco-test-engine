@@ -1,0 +1,11 @@
+- rule: Ancestor is bash
+  desc: Fires when any ancestor process is bash.
+  condition: evt.type = execve and proc.aname = bash
+  output: ancestor bash (proc=%proc.name aname=%proc.aname)
+  priority: WARNING
+
+- rule: Ancestor is zsh
+  desc: Fires when any ancestor process is zsh.
+  condition: evt.type = execve and proc.aname = zsh
+  output: ancestor zsh (proc=%proc.name aname=%proc.aname)
+  priority: WARNING

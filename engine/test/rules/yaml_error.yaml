@@ -1,0 +1,5 @@
+- rule: Broken indentation
+  desc: The condition key is mis-indented, so this is not valid YAML.
+  condition: evt.type = execve
+   output: never loads
+  priority: WARNING

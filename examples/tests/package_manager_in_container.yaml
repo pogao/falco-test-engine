@@ -1,0 +1,31 @@
+rule: Package manager run in container
+intent: >
+  Alert when a package manager is launched from a shell inside a container, which means
+  runtime drift. Our CI runner image installs packages by design and is excluded.
+defaults:
+  evt.type: execve
+  container.id: 9f2c51b0a1d4
+  container.image.repository: docker.io/library/nginx
+  k8s.ns.name: web
+  k8s.pod.name: web-6d4cf56db6-x7k2p
+  proc.aname: [bash, runc]
+cases:
+  - name: apt-get from bash in nginx
+    expect: match
+    event: {proc.name: apt-get, proc.cmdline: apt-get install -y curl}
+    output_contains: ["apt-get install -y curl", "pod=web-6d4cf56db6-x7k2p"]
+  - name: pip from sh
+    expect: match
+    event: {proc.name: pip, proc.aname: [sh, runc]}
+  - name: yum on the host is out of scope
+    expect: no_match
+    event: {proc.name: yum, container.id: host}
+  - name: CI runner installs packages by design
+    expect: no_match
+    event: {proc.name: apt, container.image.repository: ghcr.io/acme/ci-runner}
+  - name: package manager not started from a shell
+    expect: no_match
+    event: {proc.name: apk, proc.aname: [containerd-shim, systemd]}
+  - name: no other rule fires on apt-get in a container
+    expect_rules: [Package manager run in container]
+    event: {proc.name: apt-get}

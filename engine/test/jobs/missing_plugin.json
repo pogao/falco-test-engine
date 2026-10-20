@@ -1,0 +1,1 @@
+{"rules_files": [], "plugins": [{"name": "nope", "library_path": "/nonexistent/libnope.so", "init_config": ""}], "cases": []}

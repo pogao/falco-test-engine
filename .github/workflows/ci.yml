@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+      - run: ruff check ftest tests && ruff format --check ftest tests
+      - run: pytest -q
+
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the engine against Falco's source
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: builder
+          load: true
+          tags: fte-builder
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Engine protocol tests
+        run: docker run --rm fte-builder /src/falco/userspace/falco-test-engine/test/run.sh
+      - name: Build the runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: falco-test-engine:ci
+          cache-from: type=gha
+      - name: End-to-end against the examples
+        run: scripts/e2e.sh falco-test-engine:ci
+      - name: Publish
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          falco=$(grep -m1 '^ARG FALCO_VERSION=' Dockerfile | cut -d= -f2)
+          for tag in latest "falco-$falco" "sha-${GITHUB_SHA::7}"; do
+            docker tag falco-test-engine:ci "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done

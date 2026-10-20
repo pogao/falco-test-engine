@@ -1,0 +1,82 @@
+# Reusable workflow for a Falco rules repo. Call it from that repo with:
+#
+#   jobs:
+#     falco-rules:
+#       uses: pogao/falco-test-engine/.github/workflows/test-rules.yml@main
+#       permissions: {contents: read, packages: read, pull-requests: write}
+#       secrets: inherit   # optional: passes JEV_API_KEY for the Jev review
+name: test-falco-rules
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: Path to falco-test.yaml, relative to the repo root
+        type: string
+        default: falco-test.yaml
+      image:
+        description: falco-test-engine image to run
+        type: string
+        default: ghcr.io/pogao/falco-test-engine:latest
+      strict:
+        description: Also fail on error-severity lint findings
+        type: boolean
+        default: false
+      comment:
+        description: Post the report as a pull request comment
+        type: boolean
+        default: true
+    secrets:
+      JEV_API_KEY:
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Run ftest
+        id: ftest
+        env:
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+        run: |
+          set +e
+          touch "$RUNNER_TEMP/summary.md"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/summary.md:/tmp/summary.md" \
+            -e GITHUB_STEP_SUMMARY=/tmp/summary.md \
+            -e JEV_API_KEY \
+            "${{ inputs.image }}" run -c "${{ inputs.config }}" ${{ inputs.strict && '--strict' || '' }}
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: falco-test-report
+          path: |
+            **/falco-test-report.md
+            **/falco-test-report.json
+          if-no-files-found: ignore
+      - name: Comment on the pull request
+        if: always() && inputs.comment && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          report="$(dirname "${{ inputs.config }}")/falco-test-report.md"
+          [ -f "$report" ] || exit 0
+          marker='<!-- falco-test-engine -->'
+          { echo "$marker"; cat "$report"; } > "$RUNNER_TEMP/comment.md"
+          existing=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --paginate --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$existing" -F body=@"$RUNNER_TEMP/comment.md" > /dev/null
+          else
+            gh pr comment "${{ github.event.pull_request.number }}" --body-file "$RUNNER_TEMP/comment.md"
+          fi
+      - name: Fail on test failures
+        if: steps.ftest.outputs.exit_code != '0'
+        run: exit 1

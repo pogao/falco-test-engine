@@ -1,0 +1,37 @@
+- macro: user_expected_terminal_shell_in_container_conditions
+  condition: (container.image.repository = ghcr.io/acme/ci-runner or k8s.ns.name = break-glass)
+  override:
+    condition: replace
+
+- list: package_managers
+  items: [apt, apt-get, dpkg, yum, dnf, rpm, apk, pip, pip3]
+
+- rule: Package manager run in container
+  desc: A package manager ran inside a container. Containers are immutable, so installing software at runtime means drift or an intruder.
+  condition: >
+    spawned_process
+    and proc.aname in (sh, bash)
+    and container
+    and proc.name in (package_managers)
+    and not container.image.repository = ghcr.io/acme/ci-runner
+  output: Package manager in container (proc=%proc.name cmdline=%proc.cmdline parent=%proc.pname image=%container.image.repository ns=%k8s.ns.name pod=%k8s.pod.name)
+  priority: WARNING
+  tags: [container, drift, acme]
+
+- list: metadata_allowed_images
+  items: [ghcr.io/acme/node-agent, public.ecr.aws/eks/aws-node, ghcr.io/acme/node-agent]
+
+- macro: cloud_metadata_endpoint
+  condition: (fd.sip = 169.254.169.254 or fd.sip = 169.254.170.2)
+
+- rule: Cloud metadata access from container
+  desc: A containerized process connected to the cloud instance metadata service. Workloads must use workload identity instead of node credentials.
+  condition: >
+    evt.type = connect
+    and container
+    and cloud_metadata_endpoint
+    and not proc.exepath = /usr/bin/aws-node
+    and not container.image.repository in (metadata_allowed_images)
+  output: Metadata service contacted from container (proc=%proc.name cmdline=%proc.cmdline dest=%fd.sip:%fd.sport image=%container.image.repository ns=%k8s.ns.name pod=%k8s.pod.name)
+  priority: WARNING
+  tags: [container, credential_access, acme]
