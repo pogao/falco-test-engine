@@ -171,3 +171,14 @@ def test_case_error_for_an_unknown_traced_rule_reads_as_rule_not_loaded():
     assert outcome.failures == (
         "rule `Terminal shel` is not loaded (did you mean `Terminal shell in container`?)",
     )
+
+
+def test_traces_must_match_the_rule_leaf_count():
+    doc = shell_result()
+    doc["cases"][0]["traces"][SHELL]["leaves"] = [True]
+    with pytest.raises(EngineError, match="1 leaves"):
+        parse_result(doc)
+    doc = shell_result()
+    doc["rules"][0]["leaf_count"] = 6
+    with pytest.raises(EngineError, match="leaf ids are not 0..5"):
+        parse_result(doc)

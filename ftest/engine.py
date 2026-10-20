@@ -252,7 +252,18 @@ def _parse_result(doc: dict) -> EngineResult:
         )
         for item in describe.get("lists", [])
     }
+    for rule in rules.values():
+        ids = sorted(c.id for c in cond.checks(rule.compiled) if c.id is not None)
+        if ids != list(range(rule.leaf_count)):
+            raise ValueError(f"rule {rule.name!r}: condition_ast leaf ids are not 0..{rule.leaf_count - 1}")
     cases = {c["id"]: _case(c) for c in doc.get("cases", [])}
+    for case in cases.values():
+        for name, trace in case.traces.items() if isinstance(case, CaseRun) else ():
+            if name in rules and len(trace.leaves) != rules[name].leaf_count:
+                raise ValueError(
+                    f"case {case.id!r}: {len(trace.leaves)} leaves for {name!r}, expected "
+                    f"{rules[name].leaf_count}"
+                )
     return EngineResult(versions, load, rules, macros, lists, cases)
 
 

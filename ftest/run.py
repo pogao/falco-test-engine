@@ -179,12 +179,11 @@ def _brief(rule: Rule, section: RuleSection, intent: str | None) -> RuleBrief:
 def write_reports(report: RunReport, cfg: Config, env: Mapping[str, str] = os.environ) -> list[Path]:
     written = []
     text = markdown(report)
-    if cfg.report.markdown:
-        cfg.report.markdown.write_text(text)
-        written.append(cfg.report.markdown)
-    if cfg.report.json:
-        cfg.report.json.write_text(to_json(report))
-        written.append(cfg.report.json)
+    for path, content in ((cfg.report.markdown, text), (cfg.report.json, to_json(report))):
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+            written.append(path)
     if summary := env.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as f:
             f.write(text)
