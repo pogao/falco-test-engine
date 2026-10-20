@@ -105,18 +105,94 @@ def test_run_fails_on_the_broken_rules_and_says_why(repo, capsys):
     assert main(["run", "-c", "falco-test.broken.yaml"]) == 1
     md = report(repo)
     assert "**FAIL**: 6 test cases failed." in md
-    assert f"- FAIL `yum on the host is out of scope`: expected `{PKG}` not to fire; it fired." in md
-    assert f"- FAIL `pip from sh`: expected `{PKG}` to fire; it did not." in md
-    assert f"- FAIL `other acme images still alert`: expected `{SHELL}` to fire; it did not." in md
+    # The broken PKG condition parses as `(spawned_process and container and proc.name = apt)
+    # or (proc.name = yum and not container.image.repository = ghcr.io/acme/ci-runner)`.
+    assert (
+        f"- FAIL `yum on the host is out of scope`: expected `{PKG}` not to fire; it fired.\n"
+        "  - `proc.name = yum` was true, in the rule condition.\n"
+        "  - `container.image.repository = ghcr.io/acme/ci-runner` was false, in the rule condition.\n"
+    ) in md
+    assert (
+        f"- FAIL `pip from sh`: expected `{PKG}` to fire; it did not.\n"
+        "  - `proc.name = apt` was false, in the rule condition.\n"
+        "  - `proc.name = yum` was false, in the rule condition.\n"
+    ) in md
+    assert (
+        "- FAIL `no other rule fires on apt-get in a container`: expected rule set differs; "
+        f"did not fire: `{PKG}`.\n"
+        "  - `proc.name = apt` was false, in the rule condition.\n"
+        "  - `proc.name = yum` was false, in the rule condition.\n"
+    ) in md
+    assert (
+        f"- FAIL `other acme images still alert`: expected `{SHELL}` to fire; it did not.\n"
+        "  - `container.image.repository startswith ghcr.io/acme` was true, "
+        "in macro `user_expected_terminal_shell_in_container_conditions`.\n"
+    ) in md
     assert "- Readiness: not ready (see the failures above)." in md
     assert "**Readiness.**" not in md
     doc = json.loads((repo / "falco-test-report.json").read_text())
     assert doc["readiness"] == {"status": "not_ready", "reasons": ["6 test cases failed"]}
+    outcomes = {o["name"]: o for r in doc["rules"] for o in r["outcomes"]}
+    assert outcomes["pip from sh"]["why"] == [
+        {"check": "proc.name = apt", "value": False, "where": "in the rule condition", "unset": []},
+        {"check": "proc.name = yum", "value": False, "where": "in the rule condition", "unset": []},
+    ]
+    assert sum(not o["passed"] for o in outcomes.values()) == 6
+    assert all((o["why"] == []) == o["passed"] for o in outcomes.values())
     out = capsys.readouterr().out
     assert out.startswith("ftest: FAIL (6 test cases failed)")
     assert "  ready    not ready (see the failures above)" in out
     assert f"  FAIL     {PKG}: 1/6 cases" in out
     assert "; ready " not in out
+
+
+def test_failures_name_unset_fields_and_exception_checks(repo):
+    world = World.full()
+    world.rules[PKG]["exceptions"] = ["proc.pname = make"]
+    world.rules[PKG]["exception_names"] = ["build_tools"]
+    engine(repo, world, World.stock())
+    nginx = {"evt.type": "execve", "container.id": "9f2c51b0a1d4", "container.image.repository": "nginx"}
+    suite = {
+        "rule": PKG,
+        "cases": [
+            {
+                "name": "apt-get with no ancestors given",
+                "expect": "match",
+                "event": {**nginx, "proc.name": "apt-get", "container.id": "host"},
+            },
+            {
+                "name": "apt from gmake is a build step",
+                "expect": "no_match",
+                "event": {**nginx, "proc.name": "apt", "proc.aname": "bash", "proc.pname": "gmake"},
+            },
+        ],
+    }
+    (repo / "tests" / "why.yaml").write_text(yaml.safe_dump(suite))
+    assert main(["run"]) == 1
+    md = report(repo)
+    assert (
+        f"- FAIL `apt-get with no ancestors given`: expected `{PKG}` to fire; it did not.\n"
+        "  - `proc.aname in (sh, bash)` was false, in the rule condition. The case does not set `proc.aname`.\n"
+        "  - `container.id != host` was false, in macro `container`.\n"
+    ) in md
+    assert (
+        f"- FAIL `apt from gmake is a build step`: expected `{PKG}` not to fire; it fired.\n"
+        "  - `evt.type in (execve, execveat)` was true, in macro `spawned_process`.\n"
+        "  - `proc.aname in (sh, bash)` was true, in the rule condition.\n"
+        "  - `container.id != host` was true, in macro `container`.\n"
+        "  - `proc.name in (package_managers)` was true, in the rule condition.\n"
+        "  - `container.image.repository = ghcr.io/acme/ci-runner` was false, in the rule condition.\n"
+        "  - `proc.pname = make` was false, in exception `build_tools`.\n"
+    ) in md
+    doc = json.loads((repo / "falco-test-report.json").read_text())
+    outcomes = {o["name"]: o for r in doc["rules"] for o in r["outcomes"]}
+    assert outcomes["apt-get with no ancestors given"]["why"][0] == {
+        "check": "proc.aname in (sh, bash)",
+        "value": False,
+        "where": "in the rule condition",
+        "unset": ["proc.aname"],
+    }
+    assert all(o["why"] == [] for o in outcomes.values() if o["passed"])
 
 
 def test_readiness_scores_only_the_parts_that_were_measured(repo):
