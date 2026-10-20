@@ -264,11 +264,13 @@ def _jev(cfg, use_jev, env, suites, sections, full) -> tuple[str, tuple[RuleSect
             rule = full.rules[section.name]
             brief = RuleBrief(rule.name, rule.description, rule.priority, section.what_it_does)
             briefs, no_intent = oracle.events(section.name, suites, full.cases, section.strength)
+            hits = section.noise.hits if section.noise is not None else ()
             section = dataclasses.replace(
                 section,
                 jev=review(client, cfg.jev.model, brief),
                 judgments=oracle.judge(client, cfg.jev.model, briefs),
                 no_intent=no_intent,
+                triage=oracle.triage(client, cfg.jev.model, section.name, suites, hits),
             )
         reviewed.append(section)
     rules = sum(1 for s in reviewed if s.jev is not None)

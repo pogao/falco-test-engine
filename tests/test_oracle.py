@@ -5,16 +5,20 @@ from test_jev import answering, client, stubs  # noqa: F401
 
 from ftest.engine import CaseError, CaseRun, Trace
 from ftest.jev import Verdict
+from ftest.noise import Hit
 from ftest.oracle import (
     EVENT_QUESTIONS,
     EventBrief,
     Judgment,
     Origin,
+    Reading,
     Stance,
+    Triaged,
     Unjudged,
     events,
     generated,
     judge,
+    triage,
 )
 from ftest.strength import Generated, Strength, Survivor
 from ftest.suite import parse_suite
@@ -169,3 +173,46 @@ def test_each_generated_case_is_judged_once_against_its_own_suite():
     assert (briefs[0].matched, briefs[0].expect, briefs[0].origin) == (False, None, Origin.GENERATED)
     assert briefs[0].event["proc.name"] == ("zsh",) and briefs[0].event["container.id"] == ("3ad7b26ded6d",)
     assert generated(zsh_case(shell_suite(None))) is None
+
+
+YES, NO, UNSURE, FAILED = (0.9, 0.1), (0.1, 0.1), (0.5, 0.5), None
+
+
+@pytest.mark.parametrize(
+    ("answers", "reading"),
+    [
+        ((YES,), Reading.INTENDED),
+        ((NO,), Reading.FALSE_POSITIVE),
+        ((UNSURE,), Reading.UNSURE),
+        ((NO, YES), Reading.INTENDED),
+        ((FAILED, YES), Reading.INTENDED),
+        ((NO, NO), Reading.FALSE_POSITIVE),
+        ((NO, UNSURE), Reading.UNSURE),
+        ((NO, FAILED), Reading.UNSURE),
+        ((FAILED,), None),
+    ],
+)
+def test_a_hit_is_intended_when_any_intent_wants_it_and_a_false_positive_when_none_does(answers, reading):
+    b = brief(True, None)
+    calls = tuple(Unjudged(b, "boom") if a is None else Judgment(b, *a, "m", None) for a in answers)
+    assert Triaged(Hit("h", "h", "", {}), calls).reading is reading
+
+
+def test_each_noise_hit_is_judged_once_per_distinct_intent(stubs):  # noqa: F811
+    suites = (
+        shell_suite(display="tests/a.yaml"),
+        shell_suite(display="tests/b.yaml"),
+        shell_suite(None, display="tests/c.yaml"),
+        shell_suite("Alert on bash anywhere.", display="tests/d.yaml"),
+    )
+    given = {"evt.num": ("7",), "evt.type": ("execve",), "proc.name": ("bash",)}
+    stub = stubs(answering())
+    result = triage(client(stub.url), "m", "R", suites, [Hit("ordinary::x", "x", "", given)])
+    sent = [r["body"]["state"] for r in stub.requests]
+    assert len(sent) == 2 and {s["intent"] for s in sent} == {INTENT, "Alert on bash anywhere."}
+    assert all(s["event"] == {"evt.num": "7", "evt.type": "execve", "proc.name": "bash"} for s in sent)
+    assert [c.brief.suite for c in result[0].calls] == ["tests/a.yaml", "tests/d.yaml"]
+    assert {(c.brief.origin, c.brief.matched, c.brief.expect) for c in result[0].calls} == {
+        (Origin.ORDINARY, True, None)
+    }
+    assert triage(client(stub.url), "m", "R", suites[2:3], [Hit("ordinary::x", "x", "", given)]) == ()

@@ -4,11 +4,13 @@ import json
 
 import yaml
 from samples import PKG, SHELL, World
-from test_cli import engine, repo, report  # noqa: F401
+from test_cli import engine, reading_intents_as_the_cases_do, repo, report  # noqa: F401
+from test_jev import Stub, answering
 
 from ftest.cli import main
 from ftest.corpus import builtin
 from ftest.noise import Hit, sample
+from ftest.oracle import MAX_TRIAGED
 
 PKG_TERMS = (
     "spawned_process and proc.aname in (sh, bash) and container and proc.name in (package_managers) "
@@ -20,6 +22,38 @@ EXECS = sum(1 for e in builtin() if e.event["evt.type"] == ("execve",))
 def inverted(world: World) -> World:
     world.rules[PKG]["condition"] = PKG_TERMS.replace("and proc.name in", "and not proc.name in")
     return world
+
+
+def with_python(world: World) -> World:
+    """PKG also fires on python3, so it fires on the two `manage.py migrate` runs in the corpus."""
+    world.lists["package_managers"] = [*world.lists["package_managers"], "python3"]
+    return world
+
+
+MIGRATE_1 = "checkout-worker#1 (container shop/checkout-worker) runs python3 manage.py migrate --noinput"
+MIGRATE_2 = "checkout-worker#2 (container shop/checkout-worker) runs python3 manage.py migrate --noinput"
+
+
+def hits_read_by(root, call):
+    """A Stub responder: suite and generated events are read the way their cases expect, and each noise
+    hit gets `call(intent, event)`, None for unsure. Only corpus events carry `evt.num`."""
+    cases = reading_intents_as_the_cases_do(root)
+
+    def judge(state):
+        found = call(state["intent"], state["event"])
+        return (0.5, 0.5) if found is None else (0.9, 0.1) if found else (0.1, 0.1)
+
+    hits = answering(judge)
+    return lambda body: hits(body) if "evt.num" in body["state"].get("event", {}) else cases(body)
+
+
+def noise_hits(stub):
+    return [r["body"]["state"] for r in stub.requests if "evt.num" in r["body"]["state"].get("event", {})]
+
+
+def use_jev(monkeypatch, stub):
+    monkeypatch.setenv("JEV_API_KEY", "sk-test")
+    monkeypatch.setenv("JEV_BASE_URL", stub.url)
 
 
 def test_the_example_rules_fire_on_no_ordinary_event(repo):  # noqa: F811
@@ -109,3 +143,124 @@ def test_a_sample_shows_each_event_type_then_spreads_over_the_rest():
     assert [h.id for h in sample(fired, 3)] == ["0", "10", "11"]
     assert [h.id for h in sample(fired, 5)] == ["0", "10", "11", "1", "5"]
     assert [h.id for h in sample(fired, 20)] == ["0", "10", "11", *map(str, range(1, 10))]
+
+
+def test_jev_reads_each_noise_hit_against_each_intent_and_never_gates(repo, monkeypatch, capsys):  # noqa: F811
+    (repo / "tests" / "python_in_container.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "rule": PKG,
+                "intent": "Alert when python3 runs a migration in the first checkout-worker replica.",
+                "defaults": {
+                    "evt.type": "execve",
+                    "container.id": "51901fa55c3b",
+                    "proc.aname": ["bash", "runc"],
+                },
+                "cases": [
+                    {"name": "python3 from bash", "expect": "match", "event": {"proc.name": "python3"}}
+                ],
+            }
+        )
+    )
+
+    def first_replica(intent, event):
+        return "python3" in intent and event["container.id"] == "51901fa55c3b"
+
+    stub = Stub(hits_read_by(repo, first_replica))
+    try:
+        use_jev(monkeypatch, stub)
+        engine(repo, with_python(World.full()), World.stock())
+        assert main(["run"]) == 0
+        read = noise_hits(stub)
+        assert len(read) == 2 * 2
+        assert {(s["event"]["container.id"], "python3" in s["intent"]) for s in read} == {
+            ("51901fa55c3b", True),
+            ("51901fa55c3b", False),
+            ("aae427f223bf", True),
+            ("aae427f223bf", False),
+        }
+        assert all(s["event"]["evt.type"] == "execve" and "proc.aname[2]" not in s["event"] for s in read)
+
+        md = report(repo)
+        assert (
+            f"- Noise: 3 rules checked on {len(builtin())} ordinary events; none over budget; "
+            "Jev read 2 hits: 1 false positive, 1 intended." in md
+        )
+        assert (
+            f"**Noise.** Fired on 2 of the {EXECS} ordinary events of its event types (2.1%); budget 5%. "
+            "Jev read 2 hits: 1 false positive, 1 intended." in md
+        )
+        suites = ("tests/package_manager_in_container.yaml", "tests/python_in_container.yaml")
+        no, yes = "in scope p=0.10, exception p=0.10", "in scope p=0.90, exception p=0.10"
+        fp = next(line for line in md.splitlines() if line.startswith(f"- false positive: {MIGRATE_2}: `"))
+        assert fp.endswith(f"` ({suites[0]}: {no}; {suites[1]}: {no}).")
+        intended = next(line for line in md.splitlines() if line.startswith(f"- intended: {MIGRATE_1}: `"))
+        assert intended.endswith(f"` ({suites[0]}: {no}; {suites[1]}: {yes}).")
+        assert (
+            f"{PKG}: 7/7 cases; noise 2/{EXECS} (2.1%; Jev: 1 false positive, 1 intended)"
+            in capsys.readouterr().out
+        )
+
+        doc = json.loads((repo / "falco-test-report.json").read_text())
+        pkg = next(r for r in doc["rules"] if r["name"] == PKG)
+        assert {j["origin"] for r in doc["rules"] for j in r["judgments"]} == {"suite", "generated"}
+        assert [(t["event"], t["origin"], t["reading"]) for t in pkg["triage"]] == [
+            ("ordinary::helper/checkout-worker#1/0", "ordinary", "intended"),
+            ("ordinary::helper/checkout-worker#2/0", "ordinary", "false_positive"),
+        ]
+        assert pkg["triage"][0]["calls"][1] == {
+            "suite": suites[1],
+            "jev_says": "match",
+            "in_scope": 0.9,
+            "exception": 0.1,
+            "model": "jev-1.13",
+            "request_id": "req-1",
+        }
+        judged = sum(len(r["judgments"]) for r in doc["rules"])
+        assert f"3 rules reviewed and {judged} events judged with model jev-latest (advisory)." in md
+
+        cfg = yaml.safe_load((repo / "falco-test.yaml").read_text())
+        cfg["jev"] = {"gate": True}
+        (repo / "falco-test.yaml").write_text(yaml.safe_dump(cfg))
+        stub.script = hits_read_by(repo, lambda intent, event: False)
+        assert main(["run"]) == 0
+        md = report(repo)
+        assert "Jev read 2 hits: 2 false positives." in md
+        assert "Jev gate" not in md
+    finally:
+        stub.close()
+
+
+def test_jev_reads_at_most_eight_hits_and_names_a_suite_without_intent(repo, monkeypatch):  # noqa: F811
+    suite_path = repo / "tests" / "package_manager_in_container.yaml"
+    suite = yaml.safe_load(suite_path.read_text())
+    suite["cases"] = [{"name": "any shell child", "expect": "match", "event": {"proc.name": "envsubst"}}]
+    suite["max_fire_rate"] = 0.5
+    suite_path.write_text(yaml.safe_dump(suite))
+    stub = Stub(hits_read_by(repo, lambda intent, event: False))
+    try:
+        use_jev(monkeypatch, stub)
+        engine(repo, inverted(World.full()), World.stock())
+        assert main(["run"]) == 0
+        fired = json.loads((repo / "falco-test-report.json").read_text())
+        fired = next(r for r in fired["rules"] if r["name"] == PKG)["noise"]["fired"]
+        assert fired > MAX_TRIAGED
+        first = [s["event"]["evt.num"] for s in noise_hits(stub)]
+        assert len(first) == len(set(first)) == MAX_TRIAGED
+        assert f"Jev read 8 of the {fired} hits: 8 false positives." in report(repo)
+
+        assert main(["run"]) == 0
+        assert sorted(s["event"]["evt.num"] for s in noise_hits(stub)[MAX_TRIAGED:]) == sorted(first)
+
+        del suite["intent"]
+        suite_path.write_text(yaml.safe_dump(suite))
+        sent = len(noise_hits(stub))
+        assert main(["run"]) == 0
+        assert len(noise_hits(stub)) == sent
+        md = report(repo)
+        assert (
+            "- Jev did not read the hits: `tests/package_manager_in_container.yaml` states no `intent`." in md
+        )
+        assert "Jev read" not in md
+    finally:
+        stub.close()

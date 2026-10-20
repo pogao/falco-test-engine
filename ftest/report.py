@@ -16,7 +16,7 @@ from ftest.findings import Finding, Severity
 from ftest.jev import JevFailure, JevReview, Verdict
 from ftest.lint import Work
 from ftest.noise import Noise, percent
-from ftest.oracle import EventBrief, Judgment, Origin, Stance, Unjudged, word
+from ftest.oracle import EventBrief, Judgment, Origin, Reading, Stance, Triaged, Unjudged, word
 from ftest.outcomes import CaseOutcome
 from ftest.startup import StartupFailed, StartupPassed, StartupResult, StartupSkipped
 from ftest.strength import Generated, Strength
@@ -41,6 +41,7 @@ class RuleSection:
     strength: Strength | None = None
     judgments: tuple[Judgment | Unjudged, ...] = ()
     no_intent: tuple[str, ...] = ()
+    triage: tuple[Triaged, ...] = ()
 
     @property
     def failed(self) -> int:
@@ -57,6 +58,11 @@ class RuleSection:
     @property
     def jev_failed(self) -> int:
         return isinstance(self.jev, JevFailure) + sum(1 for j in self.judgments if isinstance(j, Unjudged))
+
+    @property
+    def read(self) -> tuple[Triaged, ...]:
+        """The noise hits Jev made something of: triaged hits whose requests did not all fail."""
+        return tuple(t for t in self.triage if t.reading is not None)
 
     @property
     def noisy(self) -> bool:
@@ -199,10 +205,24 @@ def _noise_line(report: RunReport) -> str:
         return report.noise
     noisy = [s for s in checked if s.noisy]
     text = f"{_plural(len(checked), 'rule')} checked on {report.noise}; "
+    read = [t for s in checked for t in s.read]
+    jev = f"; Jev read {_plural(len(read), 'hit')}: {_readings(read)}" if read else ""
     if not noisy:
-        return text + "none over budget"
+        return text + "none over budget" + jev
     worst = ", ".join(f"`{s.name}` fired on {percent(s.noise.rate)}" for s in noisy)
-    return text + f"**{len(noisy)} over budget** ({worst})"
+    return text + f"**{len(noisy)} over budget** ({worst})" + jev
+
+
+_READING = {Reading.FALSE_POSITIVE: "false positive", Reading.INTENDED: "intended", Reading.UNSURE: "unsure"}
+
+
+def _readings(read) -> str:
+    counts = Counter(t.reading for t in read)
+    return ", ".join(
+        _plural(counts[r], _READING[r]) if r is Reading.FALSE_POSITIVE else f"{counts[r]} {_READING[r]}"
+        for r in Reading
+        if counts[r]
+    )
 
 
 def _strength_line(report: RunReport) -> str:
@@ -402,14 +422,28 @@ def _noise(s: RuleSection) -> list[str]:
     if s.noise is None:
         return []
     summary = s.noise.summary[0].upper() + s.noise.summary[1:]
-    lines = ["", f"**Noise.** {'FAIL. ' if s.noisy else ''}{summary}."]
+    read = sorted(s.read, key=lambda t: list(Reading).index(t.reading))
+    jev = ""
+    if read:
+        hits = (
+            f"{len(read)} of the {s.noise.fired} hits"
+            if len(read) < s.noise.fired
+            else _plural(len(read), "hit")
+        )
+        jev = f" Jev read {hits}: {_readings(read)}."
+    lines = ["", f"**Noise.** {'FAIL. ' if s.noisy else ''}{summary}.{jev}"]
     for f in s.findings:
         if f.code == "FTE013":
             lines.append(f"- {f.code} ({f.severity.value}): {f.message}.")
             if f.suggestion:
                 lines.append(f"  Suggestion: {f.suggestion}")
-    if s.noisy:
+    lines += [f"- {_READING[t.reading]}: {t.hit.label}: `{t.hit.fields}` ({t.why})." for t in read]
+    if s.noisy and not read:
         lines += [f"- Fired on {e.label}: `{e.fields}`" for e in s.noise.examples]
+    if s.noise.fired and not s.triage:
+        lines += [f"- Jev did not read the hits: `{suite}` states no `intent`." for suite in s.no_intent]
+    errors = Counter(c.error for t in s.triage for c in t.calls if isinstance(c, Unjudged))
+    lines += [f"- {_plural(n, 'Jev request')} failed: {error}." for error, n in errors.items()]
     return lines
 
 
@@ -439,7 +473,10 @@ def console(report: RunReport, written: list[Path]) -> str:
     for s in report.sections:
         mark = "FAIL" if s.failed or not s.loaded or s.noisy or s.weak else "ok  "
         cases = f"{sum(o.passed for o in s.outcomes)}/{len(s.outcomes)} cases" if s.outcomes else "no tests"
-        noisy = f"; noise {s.noise.fired}/{s.noise.total} ({percent(s.noise.rate)})" if s.noise else ""
+        noisy = ""
+        if s.noise:
+            jev = f"; Jev: {_readings(s.read)}" if s.read else ""
+            noisy = f"; noise {s.noise.fired}/{s.noise.total} ({percent(s.noise.rate)}{jev})"
         strong = f"; strength {s.strength.killed}/{s.strength.total}" if s.strength else ""
         optimizing = s.needs_optimizing[0].lower() + s.needs_optimizing[1:]
         lines.append(f"  {mark}     {s.name}: {cases}{noisy}{strong}; {optimizing}")
@@ -515,6 +552,30 @@ def _judgment_json(j: Judgment) -> dict:
     }
 
 
+def _triage_json(t: Triaged) -> dict:
+    """No stance or verdict: a noise hit is never a dispute and never gates."""
+    calls = [
+        {
+            "suite": c.brief.suite,
+            "jev_says": None if c.call is None else word(c.call),
+            "in_scope": c.in_scope,
+            "exception": c.exception,
+            "model": c.model,
+            "request_id": c.request_id,
+        }
+        if isinstance(c, Judgment)
+        else {"suite": c.brief.suite, "error": c.error}
+        for c in t.calls
+    ]
+    return {
+        "event": t.hit.id,
+        "label": t.hit.label,
+        "origin": Origin.ORDINARY.value,
+        "reading": None if t.reading is None else t.reading.value,
+        "calls": calls,
+    }
+
+
 def to_json(report: RunReport) -> str:
     sections = []
     for s in report.sections:
@@ -530,6 +591,7 @@ def to_json(report: RunReport) -> str:
         doc["unjudged"] = [
             {**_event_json(j.brief), "error": j.error} for j in s.judgments if isinstance(j, Unjudged)
         ]
+        doc["triage"] = [_triage_json(t) for t in s.triage]
         sections.append(doc)
     startup_status = {StartupPassed: "passed", StartupFailed: "failed", StartupSkipped: "skipped"}
     doc = {

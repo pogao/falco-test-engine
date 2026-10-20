@@ -2,7 +2,8 @@
 
 The engine already decided what the rule does. Jev reads only the intent and the event's fields,
 never the rule, so a disagreement points at a rule bug, a wrong `expect`, or a vague intent. Each
-event is its own request, so no other event sits in Jev's state.
+event is its own request, so no other event sits in Jev's state. The same two questions sort the
+ordinary events a rule fires on into false positives and hits its intent wants.
 """
 
 from __future__ import annotations
@@ -15,12 +16,17 @@ from typing import Any
 
 from ftest.engine import CaseResult, CaseRun
 from ftest.jev import JevClient, JevError, Verdict
+from ftest.noise import Hit, sample
 from ftest.strength import Generated, Strength, verdicts
 from ftest.suite import Suite
 
 YES_FROM = 0.7
 NO_BELOW = 0.3
 WORKERS = 4
+# Within the default 5% budget on the built-in corpus, a rule of one event type fires on at most 7
+# events (7 of 146 opens), so Jev reads every hit of such a rule. Eight hits are enough to tell an inverted rule from one
+# meant to fire often, and cap the cost at 8 requests per rule and intent.
+MAX_TRIAGED = 8
 
 EVENT_QUESTIONS: dict[str, Any] = {
     "in_scope": {
@@ -66,17 +72,18 @@ _VERDICTS = {
 class Origin(Enum):
     SUITE = "suite"
     GENERATED = "generated"
+    ORDINARY = "ordinary"
 
 
 @dataclass(frozen=True)
 class EventBrief:
     """One event for Jev, with what the engine and the suite said about it.
 
-    `event` holds the fields as the suite writes them: its defaults under the case's own values,
-    with no derived fields and no trimming to the fields the rule reads, so Jev can see a field the
-    rule ignores. `matched` is the engine's verdict for the rule's condition. `expect` is what the
-    suite case says, and None unless `origin` is SUITE: a generated case's `expect` only copies the
-    rule."""
+    `event` holds the fields as their source writes them: for a case, its suite's defaults under the
+    case's own values. It has no derived fields and no trimming to the fields the rule reads, so Jev
+    can see a field the rule ignores. `matched` is the engine's verdict for the rule's condition; an
+    ordinary event gets a brief only because the rule fired on it. `expect` is what the suite case
+    says, and None unless `origin` is SUITE: a generated case's `expect` only copies the rule."""
 
     id: str
     name: str
@@ -135,6 +142,44 @@ class Unjudged:
     error: str
 
 
+class Reading(Enum):
+    """What Jev makes of an ordinary event the rule fired on. Order is display order."""
+
+    FALSE_POSITIVE = "false_positive"
+    INTENDED = "intended"
+    UNSURE = "unsure"
+
+
+@dataclass(frozen=True)
+class Triaged:
+    """Jev's calls on one ordinary event a rule fired on, one per distinct intent of the rule's suites.
+
+    The rule serves every intent, so the hit is intended when any intent calls for the alert and a
+    false positive only when every intent rules it out."""
+
+    hit: Hit
+    calls: tuple[Judgment | Unjudged, ...]
+
+    @property
+    def reading(self) -> Reading | None:
+        """None when every request failed."""
+        found = [c.call for c in self.calls if isinstance(c, Judgment)]
+        if not found:
+            return None
+        if True in found:
+            return Reading.INTENDED
+        if len(found) == len(self.calls) and all(call is False for call in found):
+            return Reading.FALSE_POSITIVE
+        return Reading.UNSURE
+
+    @property
+    def why(self) -> str:
+        judged = [c for c in self.calls if isinstance(c, Judgment)]
+        if len(self.calls) == 1:
+            return "; ".join(c.why for c in judged)
+        return "; ".join(f"{c.brief.suite}: {c.why}" for c in judged)
+
+
 def _read(p: float) -> bool | None:
     return True if p >= YES_FROM else False if p < NO_BELOW else None
 
@@ -187,6 +232,42 @@ def generated(g: Generated) -> EventBrief | None:
 
 def generated_id(g: Generated) -> str:
     return f"generated::{g.suite.display}::{g.name}"
+
+
+def intents(rule: str, suites: Sequence[Suite]) -> tuple[Suite, ...]:
+    """The first suite for `rule` with each distinct intent, in load order."""
+    first: dict[str, Suite] = {}
+    for s in suites:
+        if s.rule == rule and s.intent is not None:
+            first.setdefault(s.intent, s)
+    return tuple(first.values())
+
+
+def ordinary(hit: Hit, suite: Suite) -> EventBrief:
+    return EventBrief(
+        f"{hit.id}::{suite.display}",
+        hit.label,
+        suite.display,
+        suite.intent,
+        hit.given,
+        True,
+        None,
+        Origin.ORDINARY,
+    )
+
+
+def triage(
+    client: JevClient, model: str, rule: str, suites: Sequence[Suite], hits: Sequence[Hit]
+) -> tuple[Triaged, ...]:
+    """Jev's reading of up to MAX_TRIAGED of the rule's noise hits, each against every distinct intent
+    of its suites: min(len(hits), MAX_TRIAGED) x intents requests. () when no suite states an intent."""
+    stated = intents(rule, suites)
+    if not stated:
+        return ()
+    chosen = sample(hits, MAX_TRIAGED)
+    judged = judge(client, model, [ordinary(h, s) for h in chosen for s in stated])
+    n = len(stated)
+    return tuple(Triaged(h, judged[i * n : (i + 1) * n]) for i, h in enumerate(chosen))
 
 
 def state(brief: EventBrief) -> dict[str, Any]:
