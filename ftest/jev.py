@@ -1,9 +1,7 @@
-"""Advisory intent and quality judgments from Jev (TypeSafe System One).
+"""Advisory judgments from Jev (TypeSafe System One).
 
-Jev is weak at negation, arithmetic, and literal logic, so it never judges whether a
-condition is correct; the engine does that. It only answers questions a careful reader
-answers from the rule's text: does the description fit, is the priority sensible, would
-it be noisy. One request per rule under test.
+Jev is weak at negation, arithmetic, and literal logic, so it never reads a rule's condition; the
+engine evaluates conditions. Jev judges which priority fits a rule's description.
 """
 
 from __future__ import annotations
@@ -15,15 +13,13 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai"
 KEY_VARS = ("JEV_API_KEY", "TYPESAFE_API_KEY")
 
-NOUL_FINDING_BELOW = 0.3
-NOUL_OK_FROM = 0.7
 CONFIDENCE_MIN = 0.5
 
 PRIORITIES: tuple[tuple[str, str], ...] = (
@@ -36,11 +32,6 @@ PRIORITIES: tuple[tuple[str, str], ...] = (
     ("INFORMATIONAL", "Routine activity recorded for audit or context."),
     ("DEBUG", "Diagnostic detail with no direct security meaning."),
 )
-NOISE_LEVELS = (
-    "rarely fires on benign activity",
-    "fires on some benign admin activity",
-    "likely noisy in production",
-)
 
 
 class Verdict(Enum):
@@ -50,39 +41,22 @@ class Verdict(Enum):
 
 
 @dataclass(frozen=True)
-class CaseBrief:
-    name: str
-    expected: str
-    actual: str
-    passed: bool
-
-
-@dataclass(frozen=True)
 class RuleBrief:
     rule: str
     description: str
     priority: str
-    condition: str
-    compiled_condition: str
     what_it_does: tuple[str, ...]
-    intent: str | None
-    test_cases: tuple[CaseBrief, ...]
-    coverage_gaps: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class JevNote:
-    question: str
-    verdict: Verdict
-    text: str
 
 
 @dataclass(frozen=True)
 class JevReview:
+    """Jev's priority pick compared with the declared priority."""
+
     rule: str
     model: str
     request_id: str | None
-    notes: tuple[JevNote, ...]
+    verdict: Verdict
+    text: str
 
 
 @dataclass(frozen=True)
@@ -104,130 +78,31 @@ def credentials(env: Mapping[str, str] = os.environ) -> Credentials | None:
     return Credentials(env.get("JEV_BASE_URL", DEFAULT_BASE_URL).rstrip("/"), key)
 
 
-_COMPILED_LIMIT = 4000
-
-
-def state(brief: RuleBrief) -> dict[str, Any]:
-    out = asdict(brief)
-    if len(out["compiled_condition"]) > _COMPILED_LIMIT:
-        out["compiled_condition"] = out["compiled_condition"][:_COMPILED_LIMIT] + " ..."
-    if brief.intent is None:
-        del out["intent"]
-    return out
-
-
-def questions(brief: RuleBrief) -> dict[str, Any]:
-    scope = "intent" if brief.intent else "description"
-    qs: dict[str, Any] = {
-        "desc_matches": {
-            "type": "noul",
-            "instructions": "The `description` accurately describes the activity that `condition` detects.",
-            "criteria": {
-                "true": "`description` names the activity, scope, and exclusions that `condition` encodes.",
-                "false": "`description` names a different activity, or misses or contradicts a scope or "
-                "exclusion that `condition` encodes.",
-            },
-        },
-        "tests_cover_intent": {
-            "type": "noul",
-            "instructions": f"Every scenario and every exclusion that `{scope}` names has at least one entry "
-            "in `test_cases`.",
-        },
-        "priority": {
-            "type": "choice",
-            "instructions": "Which Falco priority fits an alert from this rule, judged from `description` "
-            "and `what_it_does`?",
-            "criteria": dict(PRIORITIES),
-        },
-        "noise_risk": {
-            "type": "score",
-            "instructions": "How often would this rule fire on benign activity in a typical production "
-            "Kubernetes cluster?",
-            "criteria": list(NOISE_LEVELS),
-        },
+PRIORITY_QUESTIONS: dict[str, Any] = {
+    "priority": {
+        "type": "choice",
+        "instructions": "Which Falco priority fits an alert from this rule, judged from `description` "
+        "and `what_it_does`?",
+        "criteria": dict(PRIORITIES),
     }
-    if brief.intent:
-        qs["intent_matches"] = {
-            "type": "noul",
-            "instructions": "The `condition` detects the activity that `intent` describes, with the "
-            "exclusions that `intent` names.",
-        }
-    return qs
-
-
-_NOUL_TEXT = {
-    "desc_matches": ("description matches the condition", "description may not match the condition"),
-    "intent_matches": (
-        "condition implements the stated intent",
-        "condition may not implement the stated intent",
-    ),
-    "tests_cover_intent": (
-        "test cases cover the scenarios",
-        "test cases may miss scenarios the intent names",
-    ),
 }
 
 
-def interpret(brief: RuleBrief, answers: Mapping[str, Any]) -> tuple[JevNote, ...]:
-    notes = []
-    for name, (ok_text, bad_text) in _NOUL_TEXT.items():
-        if name not in answers:
-            continue
-        p = float(answers[name]["noul"])
-        if p < NOUL_FINDING_BELOW:
-            notes.append(JevNote(name, Verdict.FINDING, f"{bad_text} (p={p:.2f})"))
-        elif p < NOUL_OK_FROM:
-            notes.append(
-                JevNote(name, Verdict.REVIEW, f"uncertain whether the {ok_text}; review (p={p:.2f})")
-            )
-        else:
-            notes.append(JevNote(name, Verdict.OK, f"{ok_text} (p={p:.2f})"))
+def state(brief: RuleBrief) -> dict[str, Any]:
+    """The declared priority stays out, so Jev's pick is not anchored on it."""
+    return {"rule": brief.rule, "description": brief.description, "what_it_does": list(brief.what_it_does)}
 
-    pick = answers["priority"]
+
+def interpret(brief: RuleBrief, pick: Mapping[str, Any]) -> tuple[Verdict, str]:
     chosen, confidence = pick["choice"], float(pick["confidence"])
     names = [n for n, _ in PRIORITIES]
     if confidence < CONFIDENCE_MIN:
-        notes.append(
-            JevNote(
-                "priority", Verdict.REVIEW, f"priority unclear (leans {chosen}, confidence {confidence:.2f})"
-            )
-        )
-    elif brief.priority not in names or chosen == brief.priority:
-        notes.append(
-            JevNote("priority", Verdict.OK, f"priority {brief.priority} fits (confidence {confidence:.2f})")
-        )
-    else:
-        distance = abs(names.index(chosen) - names.index(brief.priority))
-        verdict = Verdict.REVIEW if distance == 1 else Verdict.FINDING
-        notes.append(
-            JevNote(
-                "priority",
-                verdict,
-                f"suggests {chosen}, declared {brief.priority} (confidence {confidence:.2f})",
-            )
-        )
-
-    noise = answers["noise_risk"]
-    score, confidence = float(noise["score"]), float(noise["confidence"])
-    level = min(max(round(score), 0), len(NOISE_LEVELS) - 1)
-    if confidence < CONFIDENCE_MIN:
-        notes.append(
-            JevNote(
-                "noise_risk",
-                Verdict.REVIEW,
-                f"noise risk unclear (score {score:.1f}, confidence {confidence:.2f})",
-            )
-        )
-    else:
-        verdict = (Verdict.OK, Verdict.REVIEW, Verdict.FINDING)[level]
-        notes.append(
-            JevNote(
-                "noise_risk",
-                verdict,
-                f"{NOISE_LEVELS[level]} (score {score:.1f}, confidence {confidence:.2f})",
-            )
-        )
-    return tuple(notes)
+        return Verdict.REVIEW, f"priority unclear (leans {chosen}, confidence {confidence:.2f})"
+    if brief.priority not in names or chosen == brief.priority:
+        return Verdict.OK, f"priority {brief.priority} fits (confidence {confidence:.2f})"
+    distance = abs(names.index(chosen) - names.index(brief.priority))
+    verdict = Verdict.REVIEW if distance == 1 else Verdict.FINDING
+    return verdict, f"suggests {chosen}, declared {brief.priority} (confidence {confidence:.2f})"
 
 
 class JevError(Exception):
@@ -241,7 +116,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_ANSWER_KEYS = {"noul": ("noul",), "choice": ("choice", "confidence"), "score": ("score", "confidence")}
+_ANSWER_KEYS = {"noul": ("noul",), "choice": ("choice", "confidence")}
 
 
 class JevClient:
@@ -320,7 +195,7 @@ def _excerpt(error: urllib.error.HTTPError) -> str:
 
 def review(client: JevClient, model: str, brief: RuleBrief) -> JevReview | JevFailure:
     try:
-        answers, used_model, request_id = client.ask(model, state(brief), questions(brief), brief.rule)
+        answers, used_model, request_id = client.ask(model, state(brief), PRIORITY_QUESTIONS, brief.rule)
     except JevError as e:
         return JevFailure(brief.rule, str(e))
-    return JevReview(brief.rule, used_model, request_id, interpret(brief, answers))
+    return JevReview(brief.rule, used_model, request_id, *interpret(brief, answers["priority"]))

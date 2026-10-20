@@ -110,11 +110,7 @@ def failures(report: RunReport) -> list[str]:
         reasons.append(f"{errors} error finding{'s' if errors != 1 else ''} (--strict)")
     if report.jev_gate:
         jev_findings = sum(
-            1
-            for s in report.sections
-            if isinstance(s.jev, JevReview)
-            for n in s.jev.notes
-            if n.verdict is Verdict.FINDING
+            1 for s in report.sections if isinstance(s.jev, JevReview) and s.jev.verdict is Verdict.FINDING
         )
         jev_errors = sum(1 for s in report.sections if isinstance(s.jev, JevFailure))
         if jev_findings or jev_errors:
@@ -308,7 +304,7 @@ def _section(s: RuleSection) -> list[str]:
         else:
             rid = f", request {s.jev.request_id}" if s.jev.request_id else ""
             lines += [f"**Jev** (advisory; model {s.jev.model}{rid}).", ""]
-            lines += [f"- {n.verdict.value}: {n.text}." for n in s.jev.notes]
+            lines.append(f"- {s.jev.verdict.value}: {s.jev.text}.")
     return lines
 
 

@@ -210,13 +210,7 @@ docker run --rm -v "$PWD:/work" ghcr.io/pogao/falco-test-engine generate "Packag
 
 ## Jev review
 
-[Jev](https://docs.typesafe.ai) is TypeSafe's decision model. It answers typed yes/no, choice, and score questions about a document. Jev is weak at negation and boolean logic, so it never judges whether a rule's logic is correct; the engine does that. ftest asks Jev questions that only judgment can answer:
-
-- Does the rule's `desc` describe what the condition detects?
-- Does the condition implement the suite's `intent`?
-- Do the test cases cover the scenarios that the intent names, including its exceptions?
-- Which priority fits the rule? ftest compares the answer with the declared priority.
-- How likely is the rule to be noisy in production?
+[Jev](https://docs.typesafe.ai) is TypeSafe's decision model. It answers typed yes/no, choice, and score questions about a document. Jev is weak at negation and boolean logic, so it never reads a rule's condition; the engine does that. ftest asks Jev which priority fits the rule, judged from its `desc` and what it does, and compares the answer with the declared priority.
 
 The review is advisory. It fails the run only with `jev.gate: true`. Set the key in `JEV_API_KEY` (or TypeSafe's own `TYPESAFE_API_KEY`). `JEV_BASE_URL` overrides `https://api.typesafe.ai`. With no key, the report says Jev was skipped.
 

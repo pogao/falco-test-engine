@@ -222,7 +222,11 @@ def test_scaffold_writes_a_suite_that_lists_every_field(repo, capsys):
 
 
 def test_jev_reviews_each_rule_under_test_through_the_api(repo, monkeypatch):
-    ok = {"model": "jev-1.13", "answers": answers(desc=0.1), "usage": {"input_tokens": 1, "output_tokens": 1}}
+    ok = {
+        "model": "jev-1.13",
+        "answers": answers("EMERGENCY"),
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
     stub = Stub([(200, {"x-typesafe-request-id": f"req-{i}"}, ok) for i in range(3)])
     try:
         monkeypatch.setenv("JEV_API_KEY", "sk-test")
@@ -234,7 +238,7 @@ def test_jev_reviews_each_rule_under_test_through_the_api(repo, monkeypatch):
         md = report(repo)
         assert "- Jev: 3 rules reviewed with model jev-latest (advisory)." in md
         assert "**Jev** (advisory; model jev-1.13, request req-" in md
-        assert "- finding: description may not match the condition (p=0.10)." in md
+        assert "- finding: suggests EMERGENCY, declared NOTICE (confidence 0.80)." in md
 
         cfg = yaml.safe_load((repo / "falco-test.yaml").read_text())
         cfg["jev"] = {"gate": True}
