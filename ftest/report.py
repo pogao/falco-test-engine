@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -140,6 +142,124 @@ def failures(report: RunReport) -> list[str]:
 
 def exit_code(report: RunReport) -> int:
     return 1 if failures(report) else 0
+
+
+@dataclass(frozen=True)
+class Part:
+    """One measured part of a rule's readiness: a whole percent, rounded down, and its inputs."""
+
+    percent: int
+    inputs: str
+
+
+@dataclass(frozen=True)
+class RuleReadiness:
+    """Each part of PARTS as (name, weight, Part), or None in place of a Part it could not measure.
+    Lint is always measured, so the measured weights never sum to zero."""
+
+    rule: str
+    parts: tuple[tuple[str, int, Part | None], ...]
+
+    @property
+    def score(self) -> int:
+        """sum(weight * percent) // sum(weight) over the measured parts, in integers, so the rendered
+        parts recompute it exactly and 100 needs every measured part at 100."""
+        measured = [(w, p.percent) for _, w, p in self.parts if p is not None]
+        return sum(w * pct for w, pct in measured) // sum(w for w, _ in measured)
+
+
+@dataclass(frozen=True)
+class Ready:
+    """At least one rule. The run is as ready as its weakest rule, the first in report order on a tie."""
+
+    rules: tuple[RuleReadiness, ...]
+
+    @property
+    def weakest(self) -> RuleReadiness:
+        return min(self.rules, key=lambda r: r.score)
+
+    @property
+    def score(self) -> int:
+        return self.weakest.score
+
+
+@dataclass(frozen=True)
+class NotReady:
+    """`reasons` is `failures(report)`: every reason the run fails is a hard gate."""
+
+    reasons: tuple[str, ...]
+
+
+def readiness(report: RunReport) -> Ready | NotReady | None:
+    """How far a finished run's evidence supports merging. Report-only: it never changes the exit
+    code. None when the run passes with no rule to score."""
+    if reasons := failures(report):
+        return NotReady(tuple(reasons))
+    rules = tuple(
+        RuleReadiness(s.name, tuple((name, weight, measure(s)) for name, weight, measure in PARTS))
+        for s in report.sections
+        if s.loaded
+    )
+    return Ready(rules) if rules else None
+
+
+def _strength_part(s: RuleSection) -> Part | None:
+    """killed / total. A rule with no test cases would catch no mutant, so it scores 0."""
+    if not s.outcomes:
+        return Part(0, "no tests")
+    if s.strength is None or not s.strength.total:
+        return None
+    killed, total = s.strength.killed, s.strength.total
+    return Part(100 * killed // total, f"{killed} of {total} mutants killed")
+
+
+def _noise_part(s: RuleSection) -> Part | None:
+    """1 - (fired - intended) / (budget * total), where `intended` counts the hits Jev read as intended.
+    A disabled rule never fires, so its 0 says nothing."""
+    n = s.noise
+    if n is None or not n.total or not s.enabled:
+        return None
+    intended = sum(1 for t in s.read if t.reading is Reading.INTENDED)
+    unintended = n.fired - intended
+    share = 1.0 if unintended == 0 else max(0.0, 1 - unintended / (n.budget * n.total))
+    shown = f", {intended} intended" if intended else ""
+    # The epsilon keeps float error such as 0.58 * 100 == 57.99999999999999 from losing a point.
+    return Part(
+        math.floor(share * 100 + 1e-9), f"{n.fired} of {n.total} fired{shown}; budget {percent(n.budget)}"
+    )
+
+
+def _jev_part(s: RuleSection) -> Part | None:
+    """Agreeing / judged over the test and generated events. An unsure call stays in the count."""
+    judged = [j for j in s.judgments if isinstance(j, Judgment)]
+    if not judged:
+        return None
+    agree = sum(1 for j in judged if j.stance in (Stance.AGREES, Stance.DISPUTES_EXPECT))
+    unsure = sum(1 for j in judged if j.stance is Stance.UNSURE)
+    shown = f", {unsure} unsure" if unsure else ""
+    return Part(100 * agree // len(judged), f"{agree} of {len(judged)} agree{shown}")
+
+
+# Findings whose evidence is another part: no tests (FTE011) and surviving mutants (FTE012) are
+# strength, and the noise budget (FTE013) is noise.
+_LINT_SKIPS = frozenset({"FTE011", "FTE012", "FTE013"})
+
+
+def _lint_part(s: RuleSection) -> Part:
+    """100 - 20 per warning - 100 per error, at least 0. Info findings cost nothing."""
+    counted = [f for f in s.findings if f.code not in _LINT_SKIPS]
+    errors = sum(1 for f in counted if f.severity is Severity.ERROR)
+    warnings = sum(1 for f in counted if f.severity is Severity.WARNING)
+    shown = ", ".join(_plural(n, word) for n, word in ((errors, "error"), (warnings, "warning")) if n)
+    return Part(max(0, 100 - 20 * warnings - 100 * errors), shown or "no errors or warnings")
+
+
+PARTS: tuple[tuple[str, int, Callable[[RuleSection], Part | None]], ...] = (
+    ("strength", 4, _strength_part),
+    ("noise", 3, _noise_part),
+    ("Jev events", 2, _jev_part),
+    ("lint", 1, _lint_part),
+)
 
 
 def _plural(n: int, word: str) -> str:
