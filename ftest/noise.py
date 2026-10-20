@@ -15,23 +15,37 @@ _EXAMPLE_FIELDS = 8
 
 
 @dataclass(frozen=True)
-class Example:
+class Hit:
+    """An ordinary event the rule fired on. `fields` shows the fields the rule reads, compactly, for
+    the report. `given` is the event as its source writes it, with no derived fields, for Jev."""
+
+    id: str
     label: str
     fields: str
+    given: Mapping[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
 class Noise:
     """`total` counts only the ordinary events of the rule's event types: the ones Falco would
     evaluate the rule on. A share of the whole corpus would mostly measure the corpus's mix of
-    event types, and would hide an inverted process rule behind hundreds of file opens."""
+    event types, and would hide an inverted process rule behind hundreds of file opens.
 
-    fired: int
+    `hits` holds every event the rule fired on, in corpus order."""
+
+    hits: tuple[Hit, ...]
     total: int
     budget: float
     base_fired: int | None
     base_total: int | None
-    examples: tuple[Example, ...]
+
+    @property
+    def fired(self) -> int:
+        return len(self.hits)
+
+    @property
+    def examples(self) -> tuple[Hit, ...]:
+        return sample(self.hits, MAX_EXAMPLES)
 
     @property
     def rate(self) -> float:
@@ -73,15 +87,29 @@ def measure(
     limit: float,
 ) -> Noise:
     seen = _seen_by(rule, events)
-    fired = [e for e in seen if _fires(full.get(e.id), rule.name)]
+    hits = tuple(hit(e, rule) for e in seen if _fires(full.get(e.id), rule.name))
     base_fired = base_total = None
     if base is not None:
         base_rule, base_cases = base
         base_seen = _seen_by(base_rule, events)
         base_fired = sum(1 for e in base_seen if _fires(base_cases.get(e.id), rule.name))
         base_total = len(base_seen)
-    examples = tuple(example(e, rule) for e in _diverse(fired)[:MAX_EXAMPLES])
-    return Noise(len(fired), len(seen), limit, base_fired, base_total, examples)
+    return Noise(hits, len(seen), limit, base_fired, base_total)
+
+
+def sample(hits: Sequence[Hit], n: int) -> tuple[Hit, ...]:
+    """Up to `n` hits that show how broadly the rule fires: the first hit of each event type, then
+    hits spread evenly over the rest. The same hits in the same order on every run."""
+    first: dict[str, Hit] = {}
+    for h in hits:
+        first.setdefault(h.given["evt.type"][0], h)
+    picked = list(first.values())[:n]
+    taken = {h.id for h in picked}
+    rest = [h for h in hits if h.id not in taken]
+    room = n - len(picked)
+    if len(rest) <= room:
+        return tuple(picked + rest)
+    return tuple(picked + [rest[i * len(rest) // room] for i in range(room)])
 
 
 def _seen_by(rule: Rule, events: Sequence[Case]) -> list[Case]:
@@ -105,11 +133,11 @@ def finding(rule: str, noise: Noise) -> Finding | None:
     )
 
 
-def example(event: Case, rule: Rule) -> Example:
-    """The fields the rule reads, as compact field=value pairs."""
+def hit(event: Case, rule: Rule) -> Hit:
+    """The event with the fields the rule reads as compact field=value pairs."""
     keys = list(dict.fromkeys(["evt.type", "proc.name", *rule.condition_fields]))
     shown = [k for k in keys if k in event.event][:_EXAMPLE_FIELDS]
-    return Example(event.name, " ".join(f"{k}={_value(event.event[k])}" for k in shown))
+    return Hit(event.id, event.name, " ".join(f"{k}={_value(event.event[k])}" for k in shown), event.given)
 
 
 def _value(values: tuple[str, ...]) -> str:
@@ -120,12 +148,3 @@ def _value(values: tuple[str, ...]) -> str:
 
 def _fires(result: CaseResult | None, rule: str) -> bool:
     return isinstance(result, CaseRun) and result.alert_for(rule) is not None
-
-
-def _diverse(events: list[Case]) -> list[Case]:
-    """One event per event type first, so the examples show how broadly the rule fires."""
-    first: dict[str, Case] = {}
-    for e in events:
-        first.setdefault(e.event["evt.type"][0], e)
-    picked = {id(e) for e in first.values()}
-    return list(first.values()) + [e for e in events if id(e) not in picked]

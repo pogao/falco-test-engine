@@ -8,6 +8,7 @@ from test_cli import engine, repo, report  # noqa: F401
 
 from ftest.cli import main
 from ftest.corpus import builtin
+from ftest.noise import Hit, sample
 
 PKG_TERMS = (
     "spawned_process and proc.aname in (sh, bash) and container and proc.name in (package_managers) "
@@ -42,7 +43,12 @@ def test_an_inverted_rule_without_tests_fails_the_run(repo, capsys):  # noqa: F8
     assert 1 <= len(examples) <= 3
     assert all("proc.aname=[sh," in e or "proc.aname=[bash," in e for e in examples)
     assert f"  FAIL     {PKG}: no tests; noise " in capsys.readouterr().out
-    assert json.loads((repo / "falco-test-report.json").read_text())["exit_code"] == 1
+    doc = json.loads((repo / "falco-test-report.json").read_text())
+    assert doc["exit_code"] == 1
+    noise = next(r for r in doc["rules"] if r["name"] == PKG)["noise"]
+    assert set(noise) == {"fired", "total", "budget", "base_fired", "base_total", "examples"}
+    assert noise["fired"] > len(noise["examples"]) == len(examples)
+    assert all(set(e) == {"label", "fields"} for e in noise["examples"])
 
 
 def test_a_suite_can_raise_the_budget_for_a_rule_that_fires_often(repo):  # noqa: F811
@@ -92,3 +98,14 @@ def test_user_corpus_events_join_the_builtin_ones(repo):  # noqa: F811
     assert f"checked on {len(builtin()) + 1} ordinary events" in md
     assert f"Fired on 1 of the {EXECS + 1} ordinary events of its event types" in md
     assert "- Fired on ordinary.yaml event 1: `evt.type=execve proc.name=apt" in md
+
+
+def test_a_sample_shows_each_event_type_then_spreads_over_the_rest():
+    def hits(evt_type, ids):
+        return [Hit(str(i), str(i), "", {"evt.type": (evt_type,)}) for i in ids]
+
+    fired = hits("execve", range(10)) + hits("open", [10]) + hits("connect", [11])
+    assert [h.id for h in sample(fired, 2)] == ["0", "10"]
+    assert [h.id for h in sample(fired, 3)] == ["0", "10", "11"]
+    assert [h.id for h in sample(fired, 5)] == ["0", "10", "11", "1", "5"]
+    assert [h.id for h in sample(fired, 20)] == ["0", "10", "11", *map(str, range(1, 10))]

@@ -483,6 +483,18 @@ def _strength_json(strength: Strength) -> dict:
     }
 
 
+def _noise_json(noise: Noise) -> dict:
+    """The count and the examples, not every hit."""
+    return {
+        "fired": noise.fired,
+        "total": noise.total,
+        "budget": noise.budget,
+        "base_fired": noise.base_fired,
+        "base_total": noise.base_total,
+        "examples": [{"label": e.label, "fields": e.fields} for e in noise.examples],
+    }
+
+
 def _event_json(b: EventBrief) -> dict:
     """The event and intent are already in the suites and in the strength section's generated cases."""
     return {"case": b.name, "suite": b.suite, "origin": b.origin.value}
@@ -512,6 +524,7 @@ def to_json(report: RunReport) -> str:
         doc["jev_status"] = (
             None if s.jev is None else ("failed" if isinstance(s.jev, JevFailure) else "reviewed")
         )
+        doc["noise"] = None if s.noise is None else _noise_json(s.noise)
         doc["strength"] = None if s.strength is None else _strength_json(s.strength)
         doc["judgments"] = [_judgment_json(j) for j in s.judgments if isinstance(j, Judgment)]
         doc["unjudged"] = [
