@@ -91,7 +91,7 @@ One suite tests one rule. Several suites can test the same rule.
 
 ```yaml
 rule: Terminal shell in container
-intent: >                        # optional; Jev checks the rule against it
+intent: >                        # optional; Jev judges each case's event against it
   Alert on an interactive shell in any container except our CI runner image.
 defaults:                        # merged under every case's event
   evt.type: execve
@@ -142,7 +142,7 @@ A suite can raise the noise budget for its rule with `max_fire_rate: 0.5` at the
 | `lint.disable` | `[]` | Finding codes to skip. |
 | `jev.enabled` | `auto` | `auto` runs Jev only when an API key is set. |
 | `jev.model` | `jev-latest` | Jev model name. |
-| `jev.gate` | `false` | Fail the run on Jev findings. |
+| `jev.gate` | `false` | Fail the run on Jev findings and failed Jev requests. |
 | `report.markdown`, `report.json` | `falco-test-report.md`, `.json` | Report paths. |
 | `noise.enabled` | `true` | Run each analyzed rule over the ordinary-activity corpus. |
 | `noise.max_fire_rate` | `0.05` | Largest share of the ordinary events of a rule's event types that the rule may fire on. A suite's `max_fire_rate` overrides it for that rule. |
@@ -210,15 +210,27 @@ docker run --rm -v "$PWD:/work" ghcr.io/pogao/falco-test-engine generate "Packag
 
 ## Jev review
 
-[Jev](https://docs.typesafe.ai) is TypeSafe's decision model. It answers typed yes/no, choice, and score questions about a document. Jev is weak at negation and boolean logic, so it never judges whether a rule's logic is correct; the engine does that. ftest asks Jev questions that only judgment can answer:
+[Jev](https://docs.typesafe.ai) is TypeSafe's decision model. It answers typed yes/no and choice questions about a document. Jev is weak at negation and boolean logic, so it never reads a rule's condition. The engine evaluates conditions. Jev judges the events instead.
 
-- Does the rule's `desc` describe what the condition detects?
-- Does the condition implement the suite's `intent`?
-- Do the test cases cover the scenarios that the intent names, including its exceptions?
-- Which priority fits the rule? ftest compares the answer with the declared priority.
-- How likely is the rule to be noisy in production?
+**Does the suite's `intent` call for an alert on this event?** For each test case and each generated case, ftest sends Jev the suite's `intent` and the event's fields as the suite writes them. It sends nothing else: not the case name, not its `expect`, and not the rule. Jev answers two questions. Is the event the activity the intent asks to alert on? Does it match an exception the intent names? An event in scope with no exception calls for an alert. A clear no to the first or a clear yes to the second calls for none. Anything between is unsure. ftest compares the call with what the rule's condition matched. The report counts the events and lists only those that need a look:
 
-The review is advisory. It fails the run only with `jev.gate: true`. Set the key in `JEV_API_KEY` (or TypeSafe's own `TYPESAFE_API_KEY`). `JEV_BASE_URL` overrides `https://api.typesafe.ai`. With no key, the report says Jev was skipped.
+- A case where Jev disputes the rule. If the case passes, the rule and the case may both be wrong, or the intent may be vague. If the case fails, Jev sides with the case, and the rule is the likely culprit.
+- A failing case where Jev sides with the rule. Check the case's `expect`.
+- A generated case where Jev disputes the rule. Its `expect` only copies the rule, so the rule may have a bug there:
+
+```
+- finding: generated case `kubectl exec bash into nginx, with proc.pname=sh`: the rule says no_match; Jev reads the intent as match (in scope p=0.92, exception p=0.04). Its `expect` only copies the rule, so this may be a rule bug: if Jev is right, set `expect: match` and fix the rule.
+```
+
+Jev judges only events whose suite states an `intent`. An intent that starts with `TODO`, as `ftest scaffold` writes it, counts as none. The report names each suite it skipped. Write the intent the way you would explain the rule to a reviewer: what it must catch, where, and each exception.
+
+`ftest generate` writes Jev's call as a comment above each case it writes, and prints each case where Jev disputes the rule. Pass `--no-jev` to skip it.
+
+**Which priority fits the rule?** Jev judges this from the rule's `desc` and what it does, without seeing the declared priority. ftest then compares the answer with the declared one.
+
+Each event is its own request, so no other event sits in Jev's state. A run sends one request per rule under test and one per judged event: 27 on the examples. ftest sends four at a time. A failed request costs only its own answer.
+
+The review is advisory. With `jev.gate: true`, the run fails when Jev disputes a rule's verdict on any event, when a priority is two or more levels off, or when a request fails. Set the key in `JEV_API_KEY` (or TypeSafe's own `TYPESAFE_API_KEY`). `JEV_BASE_URL` overrides `https://api.typesafe.ai`. With no key, the report says Jev was skipped.
 
 ## Use it in CI
 

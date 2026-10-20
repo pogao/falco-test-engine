@@ -7,16 +7,15 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from ftest import mutate, noise, strength, synth
-from ftest.cond import render
-from ftest.config import Config, JevMode
+from ftest import mutate, noise, oracle, strength, synth
+from ftest.config import Config, JevMode, JevSettings
 from ftest.corpus import builtin, load_corpus, values_by_field
 from ftest.coverage import consistency, coverage
 from ftest.diff import RuleChange, changed_macros, diff_rules, untested
-from ftest.engine import CaseError, EngineError, EngineResult, JobCase, Rule, build_job, run_engine
+from ftest.engine import CaseError, EngineError, EngineResult, JobCase, build_job, run_engine
 from ftest.engine import CaseRun as EngineCaseRun
 from ftest.explain import explain
-from ftest.jev import CaseBrief, JevClient, RuleBrief, credentials, review
+from ftest.jev import JevClient, RuleBrief, credentials, review
 from ftest.lint import CaseRun, RuleView, lint_rule, load_warnings, work
 from ftest.outcomes import CaseOutcome, judge
 from ftest.report import RuleSection, RunReport, markdown, to_json
@@ -243,50 +242,43 @@ def judge_case(full: EngineResult, case: Case, rule: str) -> CaseOutcome:
     return judge(case, rule, full.cases.get(case.id), full.rules, full.known_fields)
 
 
-def _jev(cfg, use_jev, env, suites, sections, full) -> tuple[str, tuple[RuleSection, ...]]:
-    if not use_jev or cfg.jev.mode is JevMode.OFF:
-        return "off", sections
+def jev_client(settings: JevSettings, env: Mapping[str, str]) -> JevClient | str:
+    """A client, or the status line that says why Jev does not run."""
+    if settings.mode is JevMode.OFF:
+        return "off"
     creds = credentials(env)
+    if creds is None and settings.mode is JevMode.ON:
+        return "skipped: jev.enabled is true but neither JEV_API_KEY nor TYPESAFE_API_KEY is set"
     if creds is None:
-        if cfg.jev.mode is JevMode.ON:
-            return (
-                "skipped: jev.enabled is true but neither JEV_API_KEY nor TYPESAFE_API_KEY is set",
-                sections,
-            )
-        return "skipped (set JEV_API_KEY or TYPESAFE_API_KEY to enable)", sections
-    client = JevClient(creds)
-    intents = {}
-    for s in suites:
-        if s.intent:
-            intents.setdefault(s.rule, []).append(s.intent)
+        return "skipped (set JEV_API_KEY or TYPESAFE_API_KEY to enable)"
+    return JevClient(creds)
+
+
+def _jev(cfg, use_jev, env, suites, sections, full) -> tuple[str, tuple[RuleSection, ...]]:
+    client = jev_client(cfg.jev, env) if use_jev else "off"
+    if isinstance(client, str):
+        return client, sections
     reviewed = []
     for section in sections:
         if section.loaded and section.outcomes:
-            brief = _brief(full.rules[section.name], section, " ".join(intents.get(section.name, [])) or None)
-            section = dataclasses.replace(section, jev=review(client, cfg.jev.model, brief))
+            rule = full.rules[section.name]
+            brief = RuleBrief(rule.name, rule.description, rule.priority, section.what_it_does)
+            briefs, no_intent = oracle.events(section.name, suites, full.cases, section.strength)
+            section = dataclasses.replace(
+                section,
+                jev=review(client, cfg.jev.model, brief),
+                judgments=oracle.judge(client, cfg.jev.model, briefs),
+                no_intent=no_intent,
+            )
         reviewed.append(section)
-    count = sum(1 for s in reviewed if s.jev is not None)
+    rules = sum(1 for s in reviewed if s.jev is not None)
+    judged = [j for s in reviewed for j in s.judgments if isinstance(j, oracle.Judgment)]
+    disputed = sum(1 for j in judged if j.stance is oracle.Stance.DISPUTES_RULE)
     mode = "gating" if cfg.jev.gate else "advisory"
-    return f"{count} rules reviewed with model {cfg.jev.model} ({mode})", tuple(reviewed)
-
-
-def _brief(rule: Rule, section: RuleSection, intent: str | None) -> RuleBrief:
-    gaps = ()
-    if section.coverage:
-        gaps = tuple(f"`{g.text}` {g.never}" for g in section.coverage.leaves) + tuple(
-            f"{g.text} {g.never}" for g in section.coverage.parts
-        )
-    return RuleBrief(
-        rule=rule.name,
-        description=rule.description,
-        priority=rule.priority,
-        condition=rule.condition or (render(rule.raw) if rule.raw else render(rule.compiled)),
-        compiled_condition=render(rule.compiled),
-        what_it_does=section.what_it_does,
-        intent=intent,
-        test_cases=tuple(CaseBrief(o.name, o.expected, o.actual, o.passed) for o in section.outcomes),
-        coverage_gaps=gaps,
-    )
+    line = f"{rules} rules reviewed and {len(judged)} events judged with model {cfg.jev.model} ({mode})"
+    if disputed:
+        line += f"; Jev disputes the rule on {disputed} event{'s' if disputed != 1 else ''}"
+    return line, tuple(reviewed)
 
 
 def write_reports(report: RunReport, cfg: Config, env: Mapping[str, str] = os.environ) -> list[Path]:

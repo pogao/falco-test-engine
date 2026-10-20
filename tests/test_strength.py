@@ -5,6 +5,7 @@ import json
 import yaml
 from samples import META, PKG, World
 from test_cli import engine, repo, report  # noqa: F401
+from test_jev import Stub, answering
 
 from ftest.cli import main
 
@@ -90,6 +91,45 @@ def test_generate_writes_a_suite_that_kills_the_survivors(repo, capsys):  # noqa
     assert main(["generate", PKG, "-o", str(path)]) == 0
     assert path.read_text() == text
     assert "12 of 12 mutants killed" in capsys.readouterr().out
+
+
+def test_generate_writes_jevs_call_beside_each_case(repo, capsys, monkeypatch):  # noqa: F811
+    def judge(state):
+        event = state["event"]
+        if event["container.id"] == "host":
+            return 0.1, 0.1
+        return (0.9, 0.1) if event["proc.name"] == "node" else (0.5, 0.5)
+
+    stub = Stub(answering(judge))
+    try:
+        monkeypatch.setenv("JEV_API_KEY", "sk-test")
+        monkeypatch.setenv("JEV_BASE_URL", stub.url)
+        engine(repo, World.full(), World.stock())
+        weaken(repo)
+        assert main(["generate", PKG, "-o", "out/judged.yaml"]) == 0
+        out = capsys.readouterr().out
+        text = (repo / "out" / "judged.yaml").read_text()
+        assert all(set(r["body"]["questions"]) == {"in_scope", "exception"} for r in stub.requests)
+        assert len(stub.requests) == text.count("  - name: ")
+        assert (
+            "- `apt-get from bash in nginx, with proc.name=node`: Jev reads the suite's intent as match here "
+            "(in scope p=0.90, exception p=0.10): likely a rule bug. If Jev is right, set `expect: match` and "
+            "fix the rule." in out
+        )
+        host = text.index("  - name: apt-get from bash in nginx, with container.id=host")
+        assert text.rindex("  # Jev", 0, host) == text.index(
+            "  # Jev reads the suite's intent as no_match here too (in scope p=0.10, exception p=0.10).\n"
+        )
+        assert "  # Jev is unsure here (in scope p=0.50, exception p=0.50).\n" in text
+
+        sent = len(stub.requests)
+        assert main(["generate", PKG, "-o", "out/unjudged.yaml", "--no-jev"]) == 0
+        assert len(stub.requests) == sent and "# Jev" not in (repo / "out" / "unjudged.yaml").read_text()
+    finally:
+        stub.close()
+    monkeypatch.delenv("JEV_API_KEY")
+    assert main(["generate", PKG, "-o", "out/no_key.yaml"]) == 0
+    assert "jev: skipped (set JEV_API_KEY or TYPESAFE_API_KEY to enable)" in capsys.readouterr().out
 
 
 def test_generate_refuses_to_overwrite_and_needs_cases(repo, capsys):  # noqa: F811

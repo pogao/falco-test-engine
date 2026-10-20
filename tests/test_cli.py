@@ -12,10 +12,12 @@ import yaml
 from builders import install_fake_engine, received_jobs
 from samples import META, PKG, SHELL, World, broken_world
 from test_diff_and_startup import fake_falco
-from test_jev import Stub, answers
+from test_jev import Stub, answering
 
 from ftest.cli import main
 from ftest.config import load_config
+from ftest.strength import verdicts
+from ftest.suite import load_suites
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -221,28 +223,113 @@ def test_scaffold_writes_a_suite_that_lists_every_field(repo, capsys):
     assert main(["scaffold", PKG, "-o", "tests/new.yaml"]) == 1
 
 
-def test_jev_reviews_each_rule_under_test_through_the_api(repo, monkeypatch):
-    ok = {"model": "jev-1.13", "answers": answers(desc=0.1), "usage": {"input_tokens": 1, "output_tokens": 1}}
-    stub = Stub([(200, {"x-typesafe-request-id": f"req-{i}"}, ok) for i in range(3)])
+def reading_intents_as_the_cases_do(repo, flipped=(), priority="NOTICE", generated=lambda event: None):
+    """A Stub responder for Jev that reads each suite case's event the way the case expects, except the
+    cases named in `flipped`. Other events, the generated ones, get `generated`'s call, None for unsure."""
+    calls = {}
+    for suite in load_suites([repo / "tests"], repo):
+        for case in suite.cases:
+            fields = {**suite.defaults, **case.given}
+            event = {k: v[0] if len(v) == 1 else list(v) for k, v in fields.items()}
+            calls[json.dumps(event, sort_keys=True)] = verdicts(case, suite.rule)[0] != (case.name in flipped)
+
+    def judge(state):
+        key = json.dumps(state["event"], sort_keys=True)
+        call = calls[key] if key in calls else generated(state["event"])
+        return (0.5, 0.5) if call is None else (0.9, 0.1) if call else (0.1, 0.1)
+
+    return answering(judge, priority)
+
+
+def test_jev_judges_each_event_against_its_suite_intent(repo, monkeypatch):
+    stub = Stub(reading_intents_as_the_cases_do(repo))
     try:
         monkeypatch.setenv("JEV_API_KEY", "sk-test")
         monkeypatch.setenv("JEV_BASE_URL", stub.url)
         engine(repo, World.full(), World.stock())
         assert main(["run"]) == 0
-        assert len(stub.requests) == 3
-        assert {r["body"]["state"]["rule"] for r in stub.requests} == {SHELL, PKG, META}
+        priority = [r["body"]["state"]["rule"] for r in stub.requests if "priority" in r["body"]["questions"]]
+        assert sorted(priority) == sorted([SHELL, PKG, META])
+        suite_cases, generated_cases = 18, 6
+        assert len(stub.requests) == 3 + suite_cases + generated_cases
         md = report(repo)
-        assert "- Jev: 3 rules reviewed with model jev-latest (advisory)." in md
-        assert "**Jev** (advisory; model jev-1.13, request req-" in md
-        assert "- finding: description may not match the condition (p=0.10)." in md
+        assert "- Jev: 3 rules reviewed and 24 events judged with model jev-latest (advisory)." in md
+        assert "**Jev** (advisory; model jev-1.13).\n\n- ok: priority NOTICE fits (confidence 0.80)." in md
+        assert (
+            "- Jev judged 9 events against their suite's intent: it agrees with the rule on 6, is unsure on 3."
+            in md
+        )
 
         cfg = yaml.safe_load((repo / "falco-test.yaml").read_text())
         cfg["jev"] = {"gate": True}
         (repo / "falco-test.yaml").write_text(yaml.safe_dump(cfg))
-        stub.script = [(200, {}, ok) for _ in range(3)]
+        stub.script = reading_intents_as_the_cases_do(
+            repo,
+            flipped={"CI runner installs packages by design"},
+            priority="EMERGENCY",
+            generated=lambda event: event.get("proc.name") == "node" or None,
+        )
         assert main(["run"]) == 1
-        assert "Jev gate: 3 findings, 0 failed requests" in report(repo)
+        md = report(repo)
+        assert "Jev gate: 6 findings, 0 failed requests" in md
+        assert "; Jev disputes the rule on 3 events." in md
+        assert "- finding: suggests EMERGENCY, declared NOTICE (confidence 0.80)." in md
+        assert (
+            "- finding: `CI runner installs packages by design`: the rule and the case say no_match; "
+            "Jev reads the intent as match (in scope p=0.90, exception p=0.10). "
+            "The intent may be vague, or the case and the rule may both be wrong." in md
+        )
+        assert (
+            "- finding: generated case `apt-get from bash in nginx, with proc.name=node`: the rule says "
+            "no_match; Jev reads the intent as match (in scope p=0.90, exception p=0.10). Its `expect` only "
+            "copies the rule, so this may be a rule bug: if Jev is right, set `expect: match` and fix the rule."
+            in md
+        )
+        doc = json.loads((repo / "falco-test-report.json").read_text())
+        judged = {j["case"]: j for r in doc["rules"] for j in r["judgments"]}
+        assert judged["apt-get from bash in nginx, with proc.name=node"]["origin"] == "generated"
+        assert judged["CI runner installs packages by design"] == {
+            "case": "CI runner installs packages by design",
+            "suite": "tests/package_manager_in_container.yaml",
+            "origin": "suite",
+            "rule_says": "no_match",
+            "expect": "no_match",
+            "jev_says": "match",
+            "stance": "disputes_rule",
+            "verdict": "finding",
+            "in_scope": 0.9,
+            "exception": 0.1,
+            "model": "jev-1.13",
+            "request_id": "req-1",
+        }
+
+        stub.script = reading_intents_as_the_cases_do(repo)
+        assert main(["run"]) == 0
+        sent = len(stub.requests)
+        stub.script = reading_intents_as_the_cases_do(repo, flipped={"CI runner installs packages by design"})
         assert main(["run", "--no-jev"]) == 0
+        assert len(stub.requests) == sent
+    finally:
+        stub.close()
+
+
+def test_jev_sides_with_the_cases_a_broken_rule_fails(repo, monkeypatch):
+    stub = Stub(reading_intents_as_the_cases_do(repo))
+    try:
+        monkeypatch.setenv("JEV_API_KEY", "sk-test")
+        monkeypatch.setenv("JEV_BASE_URL", stub.url)
+        engine(repo, broken_world(), World.stock(), config="falco-test.broken.yaml")
+        assert main(["run", "-c", "falco-test.broken.yaml"]) == 1
+        md = report(repo)
+        assert "; Jev disputes the rule on 6 events." in md
+        assert (
+            "- finding: `pip from sh` fails, and Jev sides with the case: it reads the intent as match "
+            "(in scope p=0.90, exception p=0.10). The rule is the likely culprit." in md
+        )
+        assert (
+            "- finding: `yum on the host is out of scope` fails, and Jev sides with the case: it reads the "
+            "intent as no_match (in scope p=0.10, exception p=0.10). The rule is the likely culprit." in md
+        )
     finally:
         stub.close()
 
