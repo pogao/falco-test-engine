@@ -281,3 +281,46 @@ def case_run(case_id: str, alerts=(), traces=None) -> dict:
 
 def trace(result: bool, leaves, missing=()) -> dict:
     return {"result": result, "leaves": list(leaves), "missing_fields": list(missing)}
+
+
+FAKE_ENGINE = """#!{python}
+import json, pathlib, sys
+here = pathlib.Path({state!r})
+job = json.loads(pathlib.Path(sys.argv[sys.argv.index("--job") + 1]).read_text())
+n = len(list(here.glob("job-*.json")))
+(here / f"job-{{n}}.json").write_text(json.dumps(job))
+for entry in json.loads((here / "responses.json").read_text()):
+    if entry["rules_files"] in (None, job["rules_files"]):
+        if "exit" in entry:
+            sys.stdout.write(entry.get("stdout", ""))
+            sys.stderr.write(entry.get("stderr", ""))
+            sys.exit(entry["exit"])
+        out = dict(entry["result"])
+        by_id = out.pop("cases_by_id", {{}})
+        out["cases"] = [by_id[c["id"]] for c in job["cases"] if c["id"] in by_id]
+        print(json.dumps(out))
+        sys.exit(0)
+sys.exit("fake engine: no response for " + repr(job["rules_files"]))
+"""
+
+
+def install_fake_engine(bin_dir, state_dir, responses, name="falco-test-engine"):
+    """A stand-in engine on PATH. Each response is {"rules_files": [...] | None, "result": {...}}
+    with cases given as "cases_by_id", or {"exit": n, "stdout": ...}. Jobs land in state_dir."""
+    import json
+    import os
+    import sys
+
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "responses.json").write_text(json.dumps(list(responses)))
+    script = bin_dir / name
+    script.write_text(FAKE_ENGINE.format(python=sys.executable, state=str(state_dir)))
+    os.chmod(script, 0o755)
+    return script
+
+
+def received_jobs(state_dir):
+    import json
+
+    return [json.loads(p.read_text()) for p in sorted(state_dir.glob("job-*.json"))]
