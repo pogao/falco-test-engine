@@ -7,12 +7,12 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from ftest import noise
+from ftest import mutate, noise, strength
 from ftest.cond import render
 from ftest.config import Config, JevMode
 from ftest.corpus import builtin, load_corpus
 from ftest.coverage import consistency, coverage
-from ftest.diff import RuleChange, diff_rules, untested
+from ftest.diff import RuleChange, changed_macros, diff_rules, untested
 from ftest.engine import CaseError, EngineError, EngineResult, JobCase, Rule, build_job, run_engine
 from ftest.engine import CaseRun as EngineCaseRun
 from ftest.explain import explain
@@ -48,12 +48,16 @@ def run(
             jev="not run",
             other_rules=0,
             noise="not run",
+            mutation="not run",
             **common,
         )
 
     base_line, changes, base = _compare(cfg, full, ordinary)
     sections = analyze(full, suites, changes, cfg.lint_disable) if full.load.ok else ()
     noise_line, sections = _noise(cfg, suites, sections, ordinary, full, base)
+    if cfg.mutation.enabled:
+        changed = changed_macros(base.macros, full.macros) if base is not None else frozenset()
+        sections = _strength(cfg, suites, sections, full, changed)
     jev_line, sections = _jev(cfg, use_jev, env, suites, sections, full)
     return RunReport(
         versions=full.versions,
@@ -66,6 +70,7 @@ def run(
         jev=jev_line,
         other_rules=max(len(full.rules) - sum(1 for s in sections if s.loaded), 0),
         noise=noise_line,
+        mutation="on" if cfg.mutation.enabled else "off",
         **common,
     )
 
@@ -110,6 +115,30 @@ def _noise(cfg, suites, sections, ordinary, full, base) -> tuple[str, tuple[Rule
     if rejected:
         line += f"; the engine rejected {len(rejected)} (first: {rejected[0].id}: {rejected[0].error})"
     return line, tuple(checked)
+
+
+def _strength(cfg, suites, sections, full, changed) -> tuple[RuleSection, ...]:
+    scored = []
+    for section in sections:
+        rule = full.rules.get(section.name)
+        runs = _runs(full, suites, section.name)
+        if rule is not None and rule.enabled and runs:
+            measured = strength.measure(
+                rule, mutate.mutants(rule, shape_of(rule), changed), runs, cfg.mutation.min_score
+            )
+            findings = section.findings + tuple(strength.findings(section.name, measured))
+            section = dataclasses.replace(section, strength=measured, findings=findings)
+        scored.append(section)
+    return tuple(scored)
+
+
+def _runs(full: EngineResult, suites: tuple[Suite, ...], name: str) -> list[strength.Run]:
+    runs = []
+    for case in (c for s in suites if s.rule == name for c in s.cases):
+        result = full.cases.get(case.id)
+        if isinstance(result, EngineCaseRun) and name in result.traces:
+            runs.append(strength.Run(case, result.traces[name], result.alert_for(name) is not None))
+    return runs
 
 
 def analyze(

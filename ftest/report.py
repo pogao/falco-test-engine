@@ -16,6 +16,7 @@ from ftest.lint import Work
 from ftest.noise import Noise, percent
 from ftest.outcomes import CaseOutcome
 from ftest.startup import StartupFailed, StartupPassed, StartupResult, StartupSkipped
+from ftest.strength import Strength
 
 PERFORMANCE_CODES = frozenset({"FTE001", "FTE002", "FTE003", "FTE004", "FTE005", "FTE006", "FTE007"})
 
@@ -34,6 +35,7 @@ class RuleSection:
     work: Work | None
     jev: JevReview | JevFailure | None = None
     noise: Noise | None = None
+    strength: Strength | None = None
 
     @property
     def failed(self) -> int:
@@ -42,6 +44,10 @@ class RuleSection:
     @property
     def noisy(self) -> bool:
         return self.noise is not None and self.noise.over
+
+    @property
+    def weak(self) -> bool:
+        return self.strength is not None and self.strength.below_min
 
     @property
     def needs_optimizing(self) -> str:
@@ -69,6 +75,7 @@ class RunReport:
     jev: str
     other_rules: int
     noise: str
+    mutation: str
     strict: bool = False
     jev_gate: bool = False
 
@@ -95,6 +102,8 @@ def failures(report: RunReport) -> list[str]:
         reasons.append(f"{failed} test case{'s' if failed != 1 else ''} failed")
     if noisy := sum(1 for s in report.sections if s.noisy):
         reasons.append(f"{_plural(noisy, 'rule')} over the noise budget")
+    if weak := sum(1 for s in report.sections if s.weak):
+        reasons.append(f"{_plural(weak, 'rule')} below the test-strength minimum")
     errors = sum(1 for f in report.all_findings if f.severity is Severity.ERROR)
     if report.strict and errors:
         reasons.append(f"{errors} error finding{'s' if errors != 1 else ''} (--strict)")
@@ -185,6 +194,19 @@ def _noise_line(report: RunReport) -> str:
     return text + f"**{len(noisy)} over budget** ({worst})"
 
 
+def _strength_line(report: RunReport) -> str:
+    scored = [s.strength for s in report.sections if s.strength is not None]
+    if not scored:
+        return "off" if report.mutation == "off" else "no rule has test cases to score"
+    killed, total = sum(x.killed for x in scored), sum(x.total for x in scored)
+    survived = total - killed
+    text = f"{killed} of {total} mutants killed across {_plural(len(scored), 'rule')}"
+    text += f"; {survived} survived" if survived else "; none survived"
+    if weak := sum(1 for s in report.sections if s.weak):
+        text += f"; **{_plural(weak, 'rule')} below the minimum**"
+    return text
+
+
 def _severity_counts(findings) -> str:
     counts = [(s, sum(1 for f in findings if f.severity is s)) for s in reversed(Severity)]
     return (
@@ -207,6 +229,7 @@ def markdown(report: RunReport) -> str:
         f"- Tests: {_tests_line(report)}.",
         f"- Changes vs base: {_changes_line(report)}.",
         f"- Noise: {_noise_line(report)}.",
+        f"- Test strength: {_strength_line(report)}.",
         f"- Findings: {_severity_counts(report.all_findings)}.",
         f"- Jev: {report.jev}.",
     ]
@@ -256,6 +279,7 @@ def _section(s: RuleSection) -> list[str]:
     lines += [f"- {line}" if not line.startswith("  ") else line for line in s.what_it_does]
     lines += _tests(s)
     lines += _noise(s)
+    lines += _strength(s)
     if s.coverage and s.coverage.cases:
         lines += ["", f"**Coverage.** {s.coverage.summary}."]
         for never in ("never true", "never false"):
@@ -287,7 +311,18 @@ def _section(s: RuleSection) -> list[str]:
 
 
 _MAX_WARNINGS = 3
-OWN_SECTION_CODES = frozenset({"FTE013"})
+OWN_SECTION_CODES = frozenset({"FTE012", "FTE013"})
+
+
+def _strength(s: RuleSection) -> list[str]:
+    if s.strength is None:
+        return []
+    summary = s.strength.summary[0].upper() + s.strength.summary[1:]
+    lines = ["", f"**Test strength.** {'FAIL. ' if s.weak else ''}{summary}."]
+    for f in s.findings:
+        if f.code == "FTE012":
+            lines.append(f"- {f.code} ({f.severity.value}): {f.message}.")
+    return lines
 
 
 def _noise(s: RuleSection) -> list[str]:
@@ -327,13 +362,14 @@ def console(report: RunReport, written: list[Path]) -> str:
     lines.append(f"  load     {_load_line(report).replace('**', '')}")
     lines.append(f"  tests    {_tests_line(report)}")
     lines.append(f"  noise    {_noise_line(report).replace('**', '')}")
+    lines.append(f"  strength {_strength_line(report).replace('**', '')}")
     for s in report.sections:
-        mark = "FAIL" if s.failed or not s.loaded or s.noisy else "ok  "
+        mark = "FAIL" if s.failed or not s.loaded or s.noisy or s.weak else "ok  "
         cases = f"{sum(o.passed for o in s.outcomes)}/{len(s.outcomes)} cases" if s.outcomes else "no tests"
         noisy = f"; noise {s.noise.fired}/{s.noise.total} ({percent(s.noise.rate)})" if s.noise else ""
-        lines.append(
-            f"  {mark}     {s.name}: {cases}{noisy}; {s.needs_optimizing[0].lower()}{s.needs_optimizing[1:]}"
-        )
+        strong = f"; strength {s.strength.killed}/{s.strength.total}" if s.strength else ""
+        optimizing = s.needs_optimizing[0].lower() + s.needs_optimizing[1:]
+        lines.append(f"  {mark}     {s.name}: {cases}{noisy}{strong}; {optimizing}")
     lines.append(f"  jev      {report.jev}")
     for path in written:
         lines.append(f"  report   {path}")
@@ -373,6 +409,7 @@ def to_json(report: RunReport) -> str:
         "findings": [asdict(f) for f in report.findings],
         "jev": report.jev,
         "noise": report.noise,
+        "mutation": report.mutation,
         "other_rules": report.other_rules,
     }
     return json.dumps(doc, indent=2, default=_default)
