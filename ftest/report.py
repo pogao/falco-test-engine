@@ -134,11 +134,13 @@ def _load_line(report: RunReport) -> str:
     if report.engine_error:
         return f"**not run**: {report.engine_error}"
     load = report.load
-    status = "loaded" if load.successful else "**failed to load**"
-    text = (
-        f"{_plural(len(load.files), 'rules file')} {status}, {_plural(len(load.errors), 'error')}, "
-        f"{_plural(len(load.warnings), 'warning')}"
-    )
+    failed = [f.name for f in load.files if not f.successful]
+    if failed:
+        names = ", ".join(f"`{n}`" for n in failed)
+        status = f"{len(failed)} of {_plural(len(load.files), 'rules file')} **failed to load** ({names})"
+    else:
+        status = f"{_plural(len(load.files), 'rules file')} loaded"
+    text = f"{status}, {_plural(len(load.errors), 'error')}, {_plural(len(load.warnings), 'warning')}"
     if load.plugin_error:
         text += f"; plugin requirements not met: {load.plugin_error}"
     return text
@@ -194,10 +196,12 @@ def markdown(report: RunReport) -> str:
         out += ["", "Falco startup output (tail):", "", "```", report.startup.tail, "```"]
     if report.load is not None and report.load.errors:
         out += ["", "## Load errors", ""]
-        out += [
-            f"- `{e.code}` {e.file}:{e.line} {e.item_type} `{e.item_name}`: {e.message}"
-            for e in report.load.errors
-        ]
+        for e in report.load.errors:
+            where = f"{e.file}:{e.line}" if e.line is not None else e.file
+            item = f" {e.item_type} `{e.item_name}`" if e.item_name else ""
+            out.append(f"- `{e.code}` {where}{item}: {e.message}")
+            if e.snippet:
+                out += ["", "  ```", *(f"  {line}" for line in e.snippet.rstrip("\n").split("\n")), "  ```"]
     for section in report.sections:
         out += ["", *_section(section)]
     if report.findings:

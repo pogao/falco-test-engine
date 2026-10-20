@@ -163,7 +163,7 @@ def test_load_errors_fail_the_run_and_are_listed(repo):
     assert main(["run"]) == 1
     md = report(repo)
     assert "**FAIL**: rules failed to load." in md
-    assert f"- `LOAD_ERR_COMPILE_CONDITION` {cfg.rules_files[1]}:9 rule `{PKG}`: unexpected token" in md
+    assert f"- `LOAD_ERR_COMPILE_CONDITION` {cfg.rules_files[1]}:10 rule `{PKG}`: unexpected token" in md
     assert "- Tests: not run: rules did not load." in md
 
 

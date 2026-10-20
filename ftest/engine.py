@@ -38,6 +38,7 @@ class LoadMessage:
     item_name: str
     file: str
     line: int | None
+    snippet: str = ""
 
 
 @dataclass(frozen=True)
@@ -277,17 +278,24 @@ def _file_load(r: dict) -> FileLoad:
 
 
 def _message(m: dict) -> LoadMessage:
-    locations = m.get("context", {}).get("locations", [])
-    last = locations[-1] if locations else {}
-    position = last.get("position", {})
+    context = m.get("context", {})
+    locations = context.get("locations", [])
+    # Falco nests locations from the file down to the condition expression; the innermost ones name
+    # an in-memory string, so take the file and item from the deepest locations that have them.
+    in_file = [loc for loc in locations if not loc.get("position", {}).get("name", "").startswith('"')]
+    position = in_file[-1].get("position", {}) if in_file else {}
+    named = [loc for loc in locations if loc.get("item_name")]
+    item = named[-1] if named else (locations[-1] if locations else {})
+    line = position.get("line")
     return LoadMessage(
         code=m.get("code", ""),
         description=m.get("codedesc", ""),
         message=m.get("message", ""),
-        item_type=last.get("item_type", ""),
-        item_name=last.get("item_name", ""),
+        item_type=item.get("item_type", ""),
+        item_name=item.get("item_name", ""),
         file=position.get("name", ""),
-        line=position.get("line"),
+        line=None if line is None else line + 1,
+        snippet=context.get("snippet", ""),
     )
 
 
