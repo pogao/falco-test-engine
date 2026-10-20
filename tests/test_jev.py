@@ -31,25 +31,39 @@ def answers(priority="NOTICE", pconf=0.8):
     return {"priority": pick(priority, pconf)}
 
 
-class Stub:
-    """A local System One endpoint. `script` is a list of (status, headers, body) to serve in order."""
+def answering(judge=lambda state: (0.9, 0.1), priority="NOTICE"):
+    """A Stub responder. A priority request gets `priority`; an event request gets the in-scope and
+    exception probabilities that `judge` returns for its state."""
 
-    def __init__(self, script):
-        self.script = list(script)
+    def respond(body):
+        if "priority" in body["questions"]:
+            found = answers(priority)
+        else:
+            in_scope, exception = judge(body["state"])
+            found = {
+                "in_scope": {"type": "noul", "noul": in_scope},
+                "exception": {"type": "noul", "noul": exception},
+            }
+        return 200, {"x-typesafe-request-id": "req-1"}, {"model": "jev-1.13", "answers": found, "usage": {}}
+
+    return respond
+
+
+class Stub:
+    """A local System One endpoint. `script` is a list of (status, headers, body) to serve in order, or a
+    function from the request body to one of them."""
+
+    def __init__(self, script, host="127.0.0.1"):
+        self.script = script if callable(script) else list(script)
         self.requests = []
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 length = int(self.headers["Content-Length"])
-                stub.requests.append(
-                    {
-                        "path": self.path,
-                        "headers": dict(self.headers),
-                        "body": json.loads(self.rfile.read(length)),
-                    }
-                )
-                status, headers, body = stub.script.pop(0)
+                sent = json.loads(self.rfile.read(length))
+                stub.requests.append({"path": self.path, "headers": dict(self.headers), "body": sent})
+                status, headers, body = stub.script(sent) if callable(stub.script) else stub.script.pop(0)
                 payload = json.dumps(body).encode()
                 self.send_response(status)
                 for k, v in headers.items():
@@ -61,7 +75,7 @@ class Stub:
             def log_message(self, *args):
                 pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = ThreadingHTTPServer((host, 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(
             target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True

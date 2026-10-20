@@ -104,6 +104,8 @@ def parse_suite(raw: Any, path: Path, display: str) -> Suite:
             raise SuiteError(f"{display}: duplicate case name {case.name!r}")
         cases.append(case)
     intent = " ".join(intent.split()) if intent else None
+    if intent is not None and intent.startswith("TODO"):  # the placeholder `ftest scaffold` writes
+        intent = None
     return Suite(path, display, rule, intent, tuple(cases), defaults, max_fire_rate)
 
 

@@ -1,7 +1,8 @@
 """Advisory judgments from Jev (TypeSafe System One).
 
 Jev is weak at negation, arithmetic, and literal logic, so it never reads a rule's condition; the
-engine evaluates conditions. Jev judges which priority fits a rule's description.
+engine evaluates conditions. Jev judges test events against their suite's intent (oracle.py) and a
+rule's priority against its description.
 """
 
 from __future__ import annotations
@@ -126,17 +127,19 @@ class JevClient:
         timeout: float = 30,
         attempts: int = 4,
         sleep: Callable[[float], None] = time.sleep,
-        log: Callable[[str], None] = lambda line: print(line, file=sys.stderr),
+        log: Callable[[str], None] = lambda line: sys.stderr.write(line + "\n"),
     ):
         self._creds = creds
         self._timeout = timeout
         self._attempts = attempts
         self._sleep = sleep
         self._log = log
-        self._opener = urllib.request.build_opener(_NoRedirect)
 
     def ask(self, model: str, state: dict, questions: dict, label: str = "") -> tuple[dict, str, str | None]:
+        """Safe to call from several threads: each call builds its own opener, and the default log
+        writes each line in one call so lines do not interleave."""
         body = json.dumps({"model": model, "state": state, "questions": questions}).encode()
+        opener = urllib.request.build_opener(_NoRedirect)
         for attempt in range(self._attempts):
             request = urllib.request.Request(
                 f"{self._creds.base_url}/v1/systemone",
@@ -147,7 +150,7 @@ class JevClient:
             request.add_unredirected_header("Authorization", f"Bearer {self._creds.api_key}")
             last = attempt == self._attempts - 1
             try:
-                with self._opener.open(request, timeout=self._timeout) as response:
+                with opener.open(request, timeout=self._timeout) as response:
                     doc = json.load(response)
                     request_id = response.headers.get("x-typesafe-request-id")
                 break

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
@@ -15,6 +16,7 @@ from ftest.findings import Finding, Severity
 from ftest.jev import JevFailure, JevReview, Verdict
 from ftest.lint import Work
 from ftest.noise import Noise, percent
+from ftest.oracle import EventBrief, Judgment, Stance, Unjudged, word
 from ftest.outcomes import CaseOutcome
 from ftest.startup import StartupFailed, StartupPassed, StartupResult, StartupSkipped
 from ftest.strength import Generated, Strength
@@ -37,10 +39,24 @@ class RuleSection:
     jev: JevReview | JevFailure | None = None
     noise: Noise | None = None
     strength: Strength | None = None
+    judgments: tuple[Judgment | Unjudged, ...] = ()
+    no_intent: tuple[str, ...] = ()
 
     @property
     def failed(self) -> int:
         return sum(1 for o in self.outcomes if not o.passed)
+
+    @property
+    def jev_findings(self) -> int:
+        """What `jev.gate` fails on: a priority two or more levels off, or a disputed rule verdict."""
+        priority = isinstance(self.jev, JevReview) and self.jev.verdict is Verdict.FINDING
+        return priority + sum(
+            1 for j in self.judgments if isinstance(j, Judgment) and j.verdict is Verdict.FINDING
+        )
+
+    @property
+    def jev_failed(self) -> int:
+        return isinstance(self.jev, JevFailure) + sum(1 for j in self.judgments if isinstance(j, Unjudged))
 
     @property
     def noisy(self) -> bool:
@@ -109,12 +125,10 @@ def failures(report: RunReport) -> list[str]:
     if report.strict and errors:
         reasons.append(f"{errors} error finding{'s' if errors != 1 else ''} (--strict)")
     if report.jev_gate:
-        jev_findings = sum(
-            1 for s in report.sections if isinstance(s.jev, JevReview) and s.jev.verdict is Verdict.FINDING
-        )
-        jev_errors = sum(1 for s in report.sections if isinstance(s.jev, JevFailure))
-        if jev_findings or jev_errors:
-            reasons.append(f"Jev gate: {jev_findings} findings, {jev_errors} failed requests")
+        jev_findings = sum(s.jev_findings for s in report.sections)
+        jev_failed = sum(s.jev_failed for s in report.sections)
+        if jev_findings or jev_failed:
+            reasons.append(f"Jev gate: {jev_findings} findings, {jev_failed} failed requests")
     return reasons
 
 
@@ -246,14 +260,14 @@ def markdown(report: RunReport) -> str:
             if e.snippet:
                 out += ["", "  ```", *(f"  {line}" for line in e.snippet.rstrip("\n").split("\n")), "  ```"]
     for section in report.sections:
-        out += ["", *_section(section)]
+        out += ["", *_section(section, report.jev_gate)]
     if report.findings:
         out += ["", "## Other findings", ""]
         out += [f"- {f.code} ({f.severity.value}): {f.message}" for f in report.findings]
     return "\n".join(out) + "\n"
 
 
-def _section(s: RuleSection) -> list[str]:
+def _section(s: RuleSection, gate: bool) -> list[str]:
     status = "enabled" if s.enabled else "disabled"
     head = [f"## {s.name}", ""]
     if not s.loaded:
@@ -297,15 +311,54 @@ def _section(s: RuleSection) -> list[str]:
                 lines.append(f"  Suggestion: {f.suggestion}")
         if s.work:
             lines.append(f"- Work: {s.work.summary}.")
-    if s.jev is not None:
-        lines.append("")
-        if isinstance(s.jev, JevFailure):
-            lines.append(f"**Jev.** Request failed: {s.jev.error}.")
-        else:
-            rid = f", request {s.jev.request_id}" if s.jev.request_id else ""
-            lines += [f"**Jev** (advisory; model {s.jev.model}{rid}).", ""]
-            lines.append(f"- {s.jev.verdict.value}: {s.jev.text}.")
+    return lines + _jev(s, gate)
+
+
+def _jev(s: RuleSection, gate: bool) -> list[str]:
+    """The priority note, a one-line tally of the judged events, and only the events to look at."""
+    if s.jev is None and not s.judgments and not s.no_intent:
+        return []
+    models = [r.model for r in (s.jev, *s.judgments) if isinstance(r, JevReview | Judgment)]
+    model = f"; model {models[0]}" if models else ""
+    lines = ["", f"**Jev** ({'gating' if gate else 'advisory'}{model}).", ""]
+    if isinstance(s.jev, JevReview):
+        lines.append(f"- {s.jev.verdict.value}: {s.jev.text}.")
+    judged = [j for j in s.judgments if isinstance(j, Judgment)]
+    if judged:
+        counts = Counter(j.stance for j in judged)
+        parts = (
+            ("agrees with the rule on", counts[Stance.AGREES] + counts[Stance.DISPUTES_EXPECT]),
+            ("disputes it on", counts[Stance.DISPUTES_RULE]),
+            ("is unsure on", counts[Stance.UNSURE]),
+        )
+        said = ", ".join(f"{words} {n}" for words, n in parts if n)
+        lines.append(f"- Jev judged {_plural(len(judged), 'event')} against their suite's intent: it {said}.")
+        if not s.enabled:
+            lines.append("- The rule is disabled; Jev is compared with what its condition matched.")
+    lines += [f"- {j.verdict.value}: {_dispute(j)}" for j in judged if j.verdict is not Verdict.OK]
+    lines += [f"- Cases in `{suite}` were not judged: it states no `intent`." for suite in s.no_intent]
+    errors = [s.jev.error] if isinstance(s.jev, JevFailure) else []
+    errors += [j.error for j in s.judgments if isinstance(j, Unjudged)]
+    lines += [f"- {_plural(n, 'request')} failed: {error}." for error, n in Counter(errors).items()]
     return lines
+
+
+def _dispute(j: Judgment) -> str:
+    b, rule, jev = j.brief, word(j.brief.matched), word(j.call)
+    if j.stance is Stance.DISPUTES_EXPECT:
+        return (
+            f"`{b.name}` fails, and Jev sides with the rule: it reads the intent as {jev} ({j.why}). "
+            "Check the case's `expect`."
+        )
+    if b.expect == b.matched:
+        return (
+            f"`{b.name}`: the rule and the case say {rule}; Jev reads the intent as {jev} ({j.why}). "
+            "The intent may be vague, or the case and the rule may both be wrong."
+        )
+    return (
+        f"`{b.name}` fails, and Jev sides with the case: it reads the intent as {jev} ({j.why}). "
+        "The rule is the likely culprit."
+    )
 
 
 _MAX_WARNINGS = 3
@@ -424,6 +477,26 @@ def _strength_json(strength: Strength) -> dict:
     }
 
 
+def _event_json(b: EventBrief) -> dict:
+    """The event and intent are already in the suites and in the strength section's generated cases."""
+    return {"case": b.name, "suite": b.suite, "origin": "generated" if b.generated else "suite"}
+
+
+def _judgment_json(j: Judgment) -> dict:
+    return {
+        **_event_json(j.brief),
+        "rule_says": word(j.brief.matched),
+        "expect": None if j.brief.expect is None else word(j.brief.expect),
+        "jev_says": None if j.call is None else word(j.call),
+        "stance": j.stance.value,
+        "verdict": j.verdict.value,
+        "in_scope": j.in_scope,
+        "exception": j.exception,
+        "model": j.model,
+        "request_id": j.request_id,
+    }
+
+
 def to_json(report: RunReport) -> str:
     sections = []
     for s in report.sections:
@@ -434,6 +507,10 @@ def to_json(report: RunReport) -> str:
             None if s.jev is None else ("failed" if isinstance(s.jev, JevFailure) else "reviewed")
         )
         doc["strength"] = None if s.strength is None else _strength_json(s.strength)
+        doc["judgments"] = [_judgment_json(j) for j in s.judgments if isinstance(j, Judgment)]
+        doc["unjudged"] = [
+            {**_event_json(j.brief), "error": j.error} for j in s.judgments if isinstance(j, Unjudged)
+        ]
         sections.append(doc)
     startup_status = {StartupPassed: "passed", StartupFailed: "failed", StartupSkipped: "skipped"}
     doc = {
